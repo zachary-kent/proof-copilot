@@ -1,0 +1,3 @@
+new_big_atomic=allocates a fresh big-atomic cell
+cas=the compare-and-swap operation over a multi-word value
+value=the abstract state of the cell -- the list of values a client owns

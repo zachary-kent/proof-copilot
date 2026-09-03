@@ -1,0 +1,58 @@
+{
+  "file": "SeqlockWf.v",
+  "anonymised": false,
+  "holdout": [
+    {
+      "name": "bd42_spec",
+      "anonymised": "bd42_spec",
+      "statement": "Lemma bd42_spec (n : nat) (src : loc) dq vs :\n    length vs = n \u2192 n > 0 \u2192\n      {{{ src \u21a6\u2217{dq} vs }}}\n        bcaf2 n #src\n      {{{ v \u03b3, RET v; src \u21a6\u2217{dq} vs \u2217 efd41 v \u03b3 n \u2217 b14 \u03b3 vs  }}}.",
+      "reference_sha256": "270de33d136e17ec55538760684a2ff4de80c9184a4ec85bb244304d97c42c67",
+      "lines": 25,
+      "tactics": 39
+    },
+    {
+      "name": "x51_spec",
+      "anonymised": "x51_spec",
+      "statement": "Lemma x51_spec (\u03b3 : gname) (v : val) (n : nat) :\n    n > 0 \u2192\n      efd41 v \u03b3 n -\u2217\n        <<{ \u2200\u2200 vs, b14 \u03b3 vs  }>> \n          f5 n v @ \u2191N\n        <<{ \u2203\u2203 copy : loc, b14 \u03b3 vs | RET #copy; copy \u21a6\u2217 vs }>>.",
+      "reference_sha256": "a3e6a904da34e26461d9fff5023481cd7702e42e4d10578205d60a510854296c",
+      "lines": 96,
+      "tactics": 149
+    },
+    {
+      "name": "fc50_spec",
+      "anonymised": "fc50_spec",
+      "statement": "Lemma fc50_spec (\u03b3 : gname) (v : val) (src : loc) dq (vs' : list val) :\n    efd41 v \u03b3 (length vs') -\u2217\n      src \u21a6\u2217{dq} vs' -\u2217\n        <<{ \u2200\u2200 vs, b14 \u03b3 vs  }>> \n          c4 (length vs') v #src @ \u2191N\n        <<{ b14 \u03b3 vs' | RET #(); src \u21a6\u2217{dq} vs' }>>.",
+      "reference_sha256": "61aeca53d00960b1d4cb9a9d88b3858dc1b6541eb16d62431c9696487c38d274",
+      "lines": 178,
+      "tactics": 285
+    }
+  ],
+  "stubbed": [
+    {
+      "name": "b14",
+      "anonymised": "b14",
+      "stub": "Definition b14 (\u03b3\u1d65 : gname) (vs : list val) : iProp \u03a3 := True%I.",
+      "original_sha256": "9255f561b23c2886bef23140cace66bbbc457fa0dba018acce58378a57b29cd7"
+    },
+    {
+      "name": "efd41",
+      "anonymised": "efd41",
+      "stub": "Definition efd41 (v : val) (\u03b3 : gname) (n : nat) : iProp \u03a3 := True%I.",
+      "original_sha256": "5a47381ada6cacb5a0da3a441436e4732c294fe64f632a94e180ff32c0a3d6c0"
+    }
+  ],
+  "dropped": 38,
+  "mutable": [
+    "b14",
+    "efd41",
+    "fbe10"
+  ],
+  "results": [
+    "efd41_persistent"
+  ],
+  "allow_additions": true,
+  "rename_map": {},
+  "notes": [
+    "DESIGN.md carries the given design; it is included in every worker packet"
+  ]
+}

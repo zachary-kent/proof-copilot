@@ -1,0 +1,11 @@
+{
+  "node": "n",
+  "target": "sep_comm",
+  "anchor": "sep_comm",
+  "file": "/home/zkent/proof-copilot/eval/corpus/scratch/Basic.v",
+  "statement": "Lemma sep_comm : True.",
+  "corpus": "/home/zkent/proof-copilot/eval/corpus/scratch",
+  "siblings": [],
+  "attempt": 1,
+  "diagnose": true
+}

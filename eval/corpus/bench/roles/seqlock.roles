@@ -1,0 +1,6 @@
+new_big_atomic=allocates a fresh big-atomic cell
+read=the read operation: a seqlock-style optimistic read, retried until the version is stable
+write=the write operation: bump the version, copy, bump again
+value=the abstract state of the cell -- the list of values a client owns
+history_auth_own=authoritative ownership of the version history
+history_frag_own=a fragment of the version history, pinning one version's contents

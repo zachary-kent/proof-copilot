@@ -1,0 +1,59 @@
+name: ci
+
+# The canary (PLAN.md 8.11) executes here and before every release. Speculative
+# features are feature-flagged off by default and are not allowed to break it.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  fast:
+    # Everything that does not need Rocq: parsers, property tests, graph, packets.
+    # This job also proves the layering claim -- `pcp prove` must import where the
+    # only Rocq binary is coqc, and here there is not even that.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install
+        run: |
+          python -m pip install -U pip
+          pip install -e '.[dev]' 'pytanque @ git+https://github.com/LLM4Rocq/pytanque'
+      - name: test
+        run: pytest -q
+
+  canary:
+    # The golden end-to-end run of the daily loop, with scripted workers.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: cache the opam switch
+        id: opam-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.opam
+          key: opam-${{ runner.os }}-${{ hashFiles('env.sh') }}
+      - name: install opam
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y opam
+      - name: build the toolchain
+        if: steps.opam-cache.outputs.cache-hit != 'true'
+        run: ./scripts/setup-toolchain.sh
+      - name: install pcp
+        run: |
+          python -m pip install -U pip
+          pip install -e '.[dev]' 'pytanque @ git+https://github.com/LLM4Rocq/pytanque'
+      - name: canary
+        run: |
+          . ./env.sh
+          export ROCQPATH="$HOME/.opam/pcp/lib/coq/user-contrib"
+          pytest -q tests/test_canary.py tests/test_gate.py tests/test_cli.py

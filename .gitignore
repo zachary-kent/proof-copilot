@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.pcp/
+_build/
+*.vo
+*.vok
+*.vos
+*.glob
+.*.aux
+*.cache
+tests/goldens/shard_*.jsonl
+.lia.cache
+.nia.cache

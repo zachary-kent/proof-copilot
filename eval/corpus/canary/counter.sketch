@@ -1,0 +1,12 @@
+# A CSL sketch: the design decisions, made where cheating pressure is lowest.
+context `{!heapGS Σ}
+ghost gamma : authR natUR
+
+invariant Icount : ∃ n, own gamma (● n) ∗ l ↦ #n
+  alloc: ⊢ |==> ∃ gamma, Icount gamma
+
+function incr
+  spec: {{{ True }}} incr #l {{{ RET #(); True }}}
+  commit: the CmpXchg that succeeds
+  segment load    : ⌜True⌝
+  segment cmpxchg : ⌜True⌝

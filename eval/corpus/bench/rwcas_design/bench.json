@@ -1,0 +1,58 @@
+{
+  "file": "Rwcas.v",
+  "anonymised": false,
+  "holdout": [
+    {
+      "name": "new_rwcas_spec",
+      "anonymised": "new_rwcas_spec",
+      "statement": "Lemma new_rwcas_spec (n : Z) :\n    {{{ True }}}\n      new_rwcas #n\n    {{{ \u03b3 l, RET l; is_rwcas \u03b3 l \u2217 value \u03b3 n }}}.",
+      "reference_sha256": "ad26b5646824c9979af5157cfbb3931a45f5c3e846f95e50862b77768f5b3684",
+      "lines": 15,
+      "tactics": 24
+    },
+    {
+      "name": "read_spec",
+      "anonymised": "read_spec",
+      "statement": "Lemma read_spec (\u03b3 : gname) (v : val) :\n    is_rwcas \u03b3 v -\u2217\n      <<{ \u2200\u2200 (n : Z), value \u03b3 n }>> read v @ \u2191N <<{ value \u03b3 n | RET #n }>>.",
+      "reference_sha256": "5829fc8befdf9b5a746d6ebc90bdb048ea5e823cfd9287342221201ee4dbae3c",
+      "lines": 9,
+      "tactics": 9
+    },
+    {
+      "name": "write_spec",
+      "anonymised": "write_spec",
+      "statement": "Lemma write_spec \u03b3 v (q : Z) :\n    is_rwcas \u03b3 v -\u2217\n      <<{ \u2200\u2200 (n : Z), value \u03b3 n }>> write v #q @ \u2191N <<{ value \u03b3 q | RET #() }>>.",
+      "reference_sha256": "059036bdc44a72fba5d829a991348438b53752937d858735f071584562affd0f",
+      "lines": 92,
+      "tactics": 119
+    }
+  ],
+  "stubbed": [
+    {
+      "name": "value",
+      "anonymised": "value",
+      "stub": "Definition value (\u03b3 : gname) (n : Z) : iProp \u03a3 := True%I.",
+      "original_sha256": "bc28d3eab710b42da77a6bc83482c24b38b40a20341f60f8e8e84fc006739619"
+    },
+    {
+      "name": "is_rwcas",
+      "anonymised": "is_rwcas",
+      "stub": "Definition is_rwcas (\u03b3 : gname) (v : val) : iProp \u03a3 := True%I.",
+      "original_sha256": "dad6600806c2a2a86ae417b079cee117d057a7d599a6f2945fb797938152f073"
+    }
+  ],
+  "dropped": 14,
+  "mutable": [
+    "is_rwcas",
+    "rwcasG",
+    "value"
+  ],
+  "results": [
+    "is_rwcas_persistent"
+  ],
+  "allow_additions": true,
+  "rename_map": {},
+  "notes": [
+    "DESIGN.md carries the given design; it is included in every worker packet"
+  ]
+}

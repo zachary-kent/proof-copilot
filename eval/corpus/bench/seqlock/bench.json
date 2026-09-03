@@ -1,0 +1,79 @@
+{
+  "file": "Mf6dd3f.v",
+  "anonymised": true,
+  "holdout": [
+    {
+      "name": "new_big_atomic_spec",
+      "anonymised": "bd31_spec",
+      "statement": "Lemma bd31_spec (n : nat) (src : loc) dq vs :\n    length vs = n \u2192 n > 0 \u2192\n      {{{ src \u21a6\u2217{dq} vs }}}\n        bcaf2 n #src\n      {{{ v \u03b3, RET v; src \u21a6\u2217{dq} vs \u2217 efd30 v \u03b3 n \u2217 b10 \u03b3 vs  }}}.",
+      "reference_sha256": "4a5f52025cc103d1384ab505c21b934547a866d7dd34ff3fc0d0676c1f6f4890",
+      "lines": 18,
+      "tactics": 28
+    },
+    {
+      "name": "read_spec",
+      "anonymised": "x34_spec",
+      "statement": "Lemma x34_spec (\u03b3\u2095 : gname) (v : val) (n : nat) :\n    n > 0 \u2192\n      efd30 v \u03b3\u2095 n -\u2217\n        <<{ \u2200\u2200 vs, b10 \u03b3\u2095 vs  }>> \n          f4 n v @ \u2191N\n        <<{ \u2203\u2203 copy : loc, b10 \u03b3\u2095 vs | RET #copy; copy \u21a6\u2217 vs }>>.",
+      "reference_sha256": "9a08106feacf8b159ce629f18c996ac86708a7d012ec15634937186d788a102b",
+      "lines": 112,
+      "tactics": 180
+    },
+    {
+      "name": "write_spec",
+      "anonymised": "fc32_spec",
+      "statement": "Lemma fc32_spec (\u03b3\u2095 : gname) (v : val) (src : loc) dq (vs' : list val) :\n    efd30 v \u03b3\u2095 (length vs') -\u2217\n      src \u21a6\u2217{dq} vs' -\u2217\n        <<{ \u2200\u2200 vs, b10 \u03b3\u2095 vs  }>> \n          c3 (length vs') v #src @ \u2191N\n        <<{ b10 \u03b3\u2095 vs' | RET #(); src \u21a6\u2217{dq} vs' }>>.",
+      "reference_sha256": "6ee543b95ff5c8b5150ad7c8a015b7575af5f03d59b4ed79887fd16976b9af83",
+      "lines": 93,
+      "tactics": 146
+    }
+  ],
+  "stubbed": [],
+  "dropped": 0,
+  "mutable": [],
+  "results": [],
+  "allow_additions": true,
+  "rename_map": {
+    "Op_Nat_mod": "da0",
+    "Op_Nat_div": "cb1",
+    "new_big_atomic": "bcaf2",
+    "write": "c3",
+    "read": "f4",
+    "history": "d5",
+    "historyUR": "x6",
+    "seqlockG": "fbe7",
+    "seqlockN": "fb8",
+    "history_auth_own": "x9_own",
+    "value": "b10",
+    "history_frag_own": "a11_own",
+    "history_auth_update": "ef12_update",
+    "history_frag_alloc": "ff13_alloc",
+    "history_auth_frag_agree": "c14_agree",
+    "AU_read": "a15",
+    "seqlock_inv": "e16_inv",
+    "wp_array_copy_to'": "x17",
+    "history_auth_auth_agree": "ff18_agree",
+    "wp_array_copy_to": "ac19",
+    "wp_array_clone_wk": "de20",
+    "Even_inj": "cbf21",
+    "Odd_inj": "af22",
+    "even_inj": "x23",
+    "wp_array_copy_to_half'": "d24",
+    "wp_array_copy_to_half": "a25",
+    "even_iff_not_odd": "b26",
+    "odd_iff_not_even": "eefe27",
+    "div2_def": "ec28",
+    "array_frac_add": "d29",
+    "is_seqlock": "efd30",
+    "new_big_atomic_spec": "bd31_spec",
+    "write_spec": "fc32_spec",
+    "neq_inv": "e33_inv",
+    "read_spec": "x34_spec",
+    "seqlock_heapGS": "x35",
+    "seqlock_historyUR": "e36",
+    "seqlock_mono_natG": "fbc37",
+    "seqlock": "a38"
+  },
+  "notes": [
+    "DESIGN.md carries the given design; it is included in every worker packet"
+  ]
+}

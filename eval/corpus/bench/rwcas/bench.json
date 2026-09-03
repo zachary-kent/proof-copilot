@@ -1,0 +1,70 @@
+{
+  "file": "M8f1e46.v",
+  "anonymised": true,
+  "holdout": [
+    {
+      "name": "new_rwcas_spec",
+      "anonymised": "cec21_spec",
+      "statement": "Lemma cec21_spec (n : Z) :\n    {{{ True }}}\n      a0 #n\n    {{{ \u03b3 l, RET l; afa20 \u03b3 l \u2217 b9 \u03b3 n }}}.",
+      "reference_sha256": "ad26b5646824c9979af5157cfbb3931a45f5c3e846f95e50862b77768f5b3684",
+      "lines": 15,
+      "tactics": 24
+    },
+    {
+      "name": "read_spec",
+      "anonymised": "x22_spec",
+      "statement": "Lemma x22_spec (\u03b3 : gname) (v : val) :\n    afa20 \u03b3 v -\u2217\n      <<{ \u2200\u2200 (n : Z), b9 \u03b3 n }>> f1 v @ \u2191N <<{ b9 \u03b3 n | RET #n }>>.",
+      "reference_sha256": "5829fc8befdf9b5a746d6ebc90bdb048ea5e823cfd9287342221201ee4dbae3c",
+      "lines": 9,
+      "tactics": 9
+    },
+    {
+      "name": "write_spec",
+      "anonymised": "fc23_spec",
+      "statement": "Lemma fc23_spec \u03b3 v (q : Z) :\n    afa20 \u03b3 v -\u2217\n      <<{ \u2200\u2200 (n : Z), b9 \u03b3 n }>> c2 v #q @ \u2191N <<{ b9 \u03b3 q | RET #() }>>.",
+      "reference_sha256": "059036bdc44a72fba5d829a991348438b53752937d858735f071584562affd0f",
+      "lines": 92,
+      "tactics": 119
+    }
+  ],
+  "stubbed": [],
+  "dropped": 0,
+  "mutable": [],
+  "results": [],
+  "allow_additions": true,
+  "rename_map": {
+    "new_rwcas": "a0",
+    "read": "f1",
+    "write": "c2",
+    "requestReg": "c3",
+    "requestRegUR": "b4",
+    "rwcasG": "d5",
+    "rwcasN": "bb6",
+    "writeN": "x7",
+    "extract_result": "c8",
+    "value": "b9",
+    "AU_write": "ac10",
+    "AU_read": "a11",
+    "write_inv": "d12_inv",
+    "registry_inv": "x13_inv",
+    "registry": "bad14",
+    "registered": "ba15",
+    "rwcas_inv": "eb16_inv",
+    "registry_update": "f17_update",
+    "registry_agree": "bfd18_agree",
+    "linearize_writes": "cd19",
+    "is_rwcas": "afa20",
+    "new_rwcas_spec": "cec21_spec",
+    "read_spec": "x22_spec",
+    "write_spec": "fc23_spec",
+    "rwcas_requestUR": "ad24",
+    "rwcas_tokenG": "a25",
+    "rwcas_ghost_varG_bool": "ce26",
+    "rwcas_ghost_varG_Z": "eea27",
+    "rwcas_heapGS": "dc28",
+    "rwcas": "a29"
+  },
+  "notes": [
+    "DESIGN.md carries the given design; it is included in every worker packet"
+  ]
+}

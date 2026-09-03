@@ -1,0 +1,106 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>pcp</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fff; --fg:#111; --dim:#666; --line:#ddd;
+          --ok:#1a7f37; --bad:#b42318; --warn:#b54708; --busy:#0b62d1; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1115; --fg:#e6e6e6; --dim:#9aa0a6; --line:#2a2f3a;
+            --ok:#3fb950; --bad:#f85149; --warn:#d29922; --busy:#58a6ff; }
+  }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { padding:12px 18px; border-bottom:1px solid var(--line);
+           display:flex; gap:18px; align-items:baseline; flex-wrap:wrap; }
+  h1 { font-size:14px; margin:0; font-weight:600; letter-spacing:.04em; }
+  .pill { padding:1px 8px; border:1px solid var(--line); border-radius:10px; color:var(--dim); }
+  main { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:0; }
+  section { padding:14px 18px; min-width:0; }
+  section + section { border-left:1px solid var(--line); }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+       color:var(--dim); margin:0 0 10px; font-weight:600; }
+  table { border-collapse:collapse; width:100%; }
+  td { padding:3px 8px 3px 0; vertical-align:top; }
+  tr.node { border-bottom:1px solid var(--line); }
+  .name { font-weight:600; }
+  .integrated,.gated,.qed { color:var(--ok); }
+  .stuck,.error { color:var(--bad); }
+  .contested { color:var(--warn); }
+  .claimed { color:var(--busy); }
+  .open { color:var(--dim); }
+  .stmt { color:var(--dim); white-space:pre-wrap; word-break:break-word; }
+  .evidence { color:var(--bad); white-space:pre-wrap; font-size:12px; }
+  .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin:6px 0 2px; }
+  .bar > i { display:block; height:100%; background:var(--ok); }
+  ul { list-style:none; margin:0; padding:0; max-height:60vh; overflow:auto; }
+  li { padding:2px 0; border-bottom:1px solid var(--line); color:var(--dim); }
+  li b { color:var(--fg); font-weight:600; }
+  .stale { color:var(--warn); }
+  @media (max-width:900px){ main{grid-template-columns:1fr} section+section{border-left:0;border-top:1px solid var(--line)} }
+</style>
+<header>
+  <h1>proof-copilot</h1>
+  <span class="pill" id="summary">connecting…</span>
+  <span class="pill" id="conn">●</span>
+</header>
+<main>
+  <section>
+    <h2>Obligations</h2>
+    <div class="bar"><i id="burn" style="width:0%"></i></div>
+    <div class="stmt" id="burntext"></div>
+    <table id="nodes"></table>
+  </section>
+  <section>
+    <h2>Activity</h2>
+    <ul id="events"></ul>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+
+function renderSnapshot(s) {
+  const order = { claimed:0, open:1, stuck:2, contested:3, gated:4, integrated:5, attic:6 };
+  const nodes = [...s.nodes].sort((a,b) =>
+    (order[a.proof_status] ?? 9) - (order[b.proof_status] ?? 9) || a.name.localeCompare(b.name));
+  $('nodes').innerHTML = nodes.map(n => `
+    <tr class="node">
+      <td class="name">${esc(n.name)}${n.rank === 'root' ? ' <span class="pill">root</span>' : ''}${n.stale ? ' <span class="stale">stale</span>' : ''}</td>
+      <td class="${esc(n.proof_status)}">${esc(n.proof_status)}</td>
+      <td class="stmt">@${n.epoch} · ${n.attempts} attempt(s)</td>
+    </tr>
+    <tr><td colspan="3" class="stmt">${esc(n.statement)}</td></tr>
+    ${n.evidence ? `<tr><td colspan="3" class="evidence">${esc(n.evidence)}</td></tr>` : ''}
+  `).join('');
+  const b = s.burndown || {live:0, discharged:0, remaining:0, attic:0};
+  const pct = b.live ? Math.round(100 * b.discharged / b.live) : 0;
+  $('burn').style.width = pct + '%';
+  // Progress is live admits discharged; attic lemmas measure as zero, on purpose.
+  $('burntext').textContent =
+    `${b.discharged}/${b.live} discharged (${pct}%)` + (b.attic ? ` · ${b.attic} in the attic (counts as zero)` : '');
+  $('summary').textContent = Object.entries(s.summary || {})
+    .map(([k, v]) => `${v} ${k}`).join(' · ') || 'empty graph';
+}
+
+function addEvent(e) {
+  const li = document.createElement('li');
+  const t = new Date(e.ts * 1000).toLocaleTimeString();
+  li.innerHTML = `${t} <b>${esc(e.kind)}</b> ${esc(e.node || '')} ${esc(summarise(e.payload))}`;
+  $('events').prepend(li);
+  while ($('events').children.length > 300) $('events').lastChild.remove();
+}
+
+function summarise(p) {
+  if (!p) return '';
+  return Object.entries(p).filter(([k]) => k !== 'summary')
+    .map(([k, v]) => `${k}=${String(v).slice(0, 60)}`).join(' ');
+}
+
+const esc = (s) => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+fetch('/api/graph').then(r => r.json()).then(renderSnapshot).catch(() => {});
+const es = new EventSource('/events');
+es.addEventListener('graph', (m) => addEvent(JSON.parse(m.data)));
+es.addEventListener('snapshot', (m) => renderSnapshot(JSON.parse(m.data)));
+es.onopen = () => { $('conn').textContent = '● live'; };
+es.onerror = () => { $('conn').textContent = '● reconnecting'; };
+</script>

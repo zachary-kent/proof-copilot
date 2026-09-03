@@ -1,0 +1,11 @@
+{
+  "mutable": [
+    "is_rwcas",
+    "rwcasG",
+    "value"
+  ],
+  "results": [
+    "is_rwcas_persistent"
+  ],
+  "allow_additions": true
+}
