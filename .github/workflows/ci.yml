@@ -10,9 +10,9 @@ on:
 
 jobs:
   fast:
-    # Everything that does not need Rocq: parsers, property tests, graph, packets.
-    # This job also proves the layering claim -- `pcp prove` must import where the
-    # only Rocq binary is coqc, and here there is not even that.
+    # Everything that does not need Rocq: lexer, gate statics, graph, packets, runners,
+    # ledger, patterns. This job also proves the layering claim -- `pcp prove` must
+    # import where the only Rocq binary is coqc, and here there is not even that.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,8 +23,10 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -e '.[dev]' 'pytanque @ git+https://github.com/LLM4Rocq/pytanque'
+      - name: lint
+        run: ruff check pcp tests eval
       - name: test
-        run: pytest -q
+        run: pytest -q -m "not rocq and not petanque"
 
   canary:
     # The golden end-to-end run of the daily loop, with scripted workers.
@@ -44,16 +46,16 @@ jobs:
       - name: install opam
         run: |
           sudo apt-get update
-          sudo apt-get install -y opam
+          sudo apt-get install -y opam bubblewrap
       - name: build the toolchain
         if: steps.opam-cache.outputs.cache-hit != 'true'
         run: ./scripts/setup-toolchain.sh
       - name: install pcp
         run: |
           python -m pip install -U pip
-          pip install -e '.[dev]' 'pytanque @ git+https://github.com/LLM4Rocq/pytanque'
+          pip install -e '.[mcp,dev]' 'pytanque @ git+https://github.com/LLM4Rocq/pytanque'
       - name: canary
         run: |
           . ./env.sh
           export ROCQPATH="$HOME/.opam/pcp/lib/coq/user-contrib"
-          pytest -q tests/test_canary.py tests/test_gate.py tests/test_cli.py
+          pytest -q tests/test_canary.py tests/test_gate.py tests/test_cli.py tests/test_rocq.py

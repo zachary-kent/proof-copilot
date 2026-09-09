@@ -3,6 +3,8 @@ __pycache__/
 .venv/
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .pcp/
 _build/
 *.vo
@@ -11,6 +13,8 @@ _build/
 *.glob
 .*.aux
 *.cache
+*__pcpfast.v
+*__pcpexplain.v
 tests/goldens/shard_*.jsonl
 .lia.cache
 .nia.cache

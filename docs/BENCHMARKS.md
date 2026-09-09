@@ -223,6 +223,28 @@ Whatever a rung is given, the packet **names** (`render_library`). This is the s
 lesson as `describe_tools`: a granted resource the worker is never told about is an
 ungranted resource, and it also means the trace records what the run actually had.
 
+## Spec-only design rungs: results (2026-09-04/05)
+
+Every design rung run with `--brief spec-only --no-carry --no-paper`: the worker and the
+decomposer saw the implementation and the specifications and nothing else. All three targets
+integrate (`Qed`, `Print Assumptions` clean). Costs are the sum over every attempt on the rung's
+graph, including the runs that failed while the orchestration was being fixed.
+
+| rung | target | design rounds | wall clock | cost | what it took |
+|---|---|---|---|---|---|
+| `rwcas_design` | `write_spec` | 1 | 45 min | $14 | first proposal held |
+| `seqlock_design` | `write_spec` | 1 (on rerun) | 34 min | $15 | first run lost to an unrelated bug, rerun integrated |
+| `seqlock_wf_design` | `fc50_spec` | 8 | ~2 days of runs | $98 | rounds 4–7 each lost to a decomposer *shape* slip (key synonyms, root restated as a child, a one-token syntax error, `statement` used for a definition); round 8 held, and its last two children were contested validly (a resource stated outside a `□`-boxed triple) and settled by the approver **restating** them -- 10 s each, no ninth round |
+
+The `seqlock_wf_design` row is the one that changed the orchestration: the repair tier (a
+mis-shaped design is re-asked at the cheap tier, never a new round), tolerant protocol reading,
+`standing_failures` in the revision loop, the restatement verdict, the cheap tier after every
+revision's dispatch, and the resource-outside-triple sentinel all come from its failures. Its
+solution file is `PARTIAL` for the *file*: the two specifications that were not the target
+(`bd42_spec`, `x51_spec`) stay `Admitted`. Records: `.pcp/runs/ladder_spec3_20260904_seqlock_wf_design/`
+(final run `20260905-195056`); the ladder's own summary JSON still holds the timed-out row from the
+first attempt, because manual resumes are not written back to it.
+
 ## Running
 
 ```bash

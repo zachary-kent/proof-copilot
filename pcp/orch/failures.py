@@ -1,27 +1,41 @@
 """Failure classification, so a benchmark run says *what to fix* (PLAN.md 1, 13).
 
-A solve rate is a number; a failure taxonomy is a work queue.  PLAN.md 1 already
-names the failure modes worth counting, roughly in order of how much time they waste,
-and the whole design brief rests on the claim that they are *tool* problems rather
-than model problems.  That claim is falsifiable, and this is what falsifies it: if a
-run's failures are dominated by classes the tooling addresses and the solve rate does
-not move when the tooling is switched on, the claim is wrong.
+A solve rate is a number; a failure taxonomy is a work queue.  Classification is
+deterministic and honest about its limits: anything it cannot place lands in
+``unclassified`` rather than being forced into the nearest bucket.
 
-Classification is deterministic and pattern-based, and it is honest about its limits:
-anything it cannot place lands in ``unclassified`` rather than being forced into the
-nearest bucket.  A taxonomy that always has an answer teaches you nothing.
+What changed from the legacy classifier, and why (each is a bug in
+``SCRATCH/bugs-orch-core.md``):
+
+* the runner's exit status, ``NodeResult.status == "error"`` and a gate that could
+  not run are **first-class inputs**, not regex targets -- so a compile error on
+  line 401 is a compile error and a sandbox that failed to start is not a stuck
+  worker (``runner-error``);
+* every regex is anchored or word-bounded: ``Resolve`` no longer matches
+  ``unresolved``, ``AU`` no longer matches ``au``;
+* ``gate-violation`` fires only on a ``[FAIL]`` line of a gate report, never on the
+  check *names*, which every report prints;
+* the gate's own compile timeout is infrastructure, never the worker's ``deadline``;
+* :func:`summarize` classifies every record with exactly the inputs
+  :func:`classify_record` uses when the record is written, so ``pcp failures`` and
+  ``record.json`` agree.
+
+Stdlib only: the streaming runner imports this at capture time.
 """
 
 from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Any
 
-#: The taxonomy.  The first seven are PLAN.md 1's list, in its order; the rest are
-#: failures of the *pipeline* rather than of Iris reasoning, and are worth separating
-#: because they are fixed in completely different places.
+#: Detail prefix the gate uses when it could not run at all (missing/timed-out coqc).
+GATE_COULD_NOT_RUN = "gate could not run:"
+
+#: The taxonomy (contract §1.12).  The first seven are PLAN.md 1's list, in its order;
+#: the rest are failures of the *pipeline* rather than of Iris reasoning.
 TAXONOMY: dict[str, str] = {
     "premature-consumption": "a spatial hypothesis was eliminated early and needed later",
     "leftover-spatial": "iFrame/done failed because the spatial context was not empty",
@@ -48,169 +62,132 @@ TAXONOMY: dict[str, str] = {
     "runner-error": "the provider or its CLI failed; not a proof failure",
     "unclassified": "no rule matched -- read the record",
 }
+assert len(TAXONOMY) == 24
 
+_I = re.IGNORECASE
+_M = re.MULTILINE
 #: (class, regex, weight).  Weight breaks ties when several rules fire; higher wins.
 _RULES: list[tuple[str, re.Pattern[str], int]] = [
-    # -- Iris reasoning ----------------------------------------------------
-    ("leftover-spatial", re.compile(r"spatial context is not empty|iFrame.*cannot|not all resources|cannot solve.*emp", re.I), 6),
-    ("pattern-mismatch", re.compile(r"iOrDestruct|iAndDestruct|cannot destruct|pattern/prop mismatch|not a disjunction|intro pattern", re.I), 7),
-    ("mask-arithmetic", re.compile(r"mask|↑\w+ ⊆|∖ ↑|fupd_mask|invariant .* already open|not.*disjoint", re.I), 6),
+    ("leftover-spatial", re.compile(r"spatial context is not empty|\biFrame\b.*\bcannot\b|not all resources|cannot solve.*\bemp\b", _I), 6),
+    ("pattern-mismatch", re.compile(r"\biOrDestruct\b|\biAndDestruct\b|cannot destruct|pattern/prop mismatch|not a disjunction|intro pattern", _I), 7),
+    ("mask-arithmetic", re.compile(r"\bmasks?\b|↑\w+ ⊆|∖ ↑|\bfupd_mask\b|invariant .* already open|\bnot\b.*\bdisjoint\b", _I), 6),
     ("later-modality", re.compile(
-        r"iNext|▷|\blater\b|timeless|MaybeIntoLaterN|is not later|"
-        r"iModIntro[^\n]*not a modality|goal is not a modality|IntoModal", re.I), 5),
-    ("persistent-vs-spatial", re.compile(r"not persistent|IntoPersistent|Persistent .* instance|intuitionistic context", re.I), 6),
-    # `wp_bind: cannot find (! ?e)%E in ...` is *not* a retrieval failure: the lemma
-    # exists, the program term is not in the shape the tactic expected.  Filing it
-    # under retrieval inflated that bucket and hid the mode the state layer's WP
-    # expression field addresses directly.
-    ("evaluation-position", re.compile(r"wp_(?:bind|pure|apply)[^\n]*cannot find|is not a redex|not a value|no (?:such )?evaluation context", re.I), 9),
-    ("retrieval", re.compile(r"was not found in the current environment|Unknown (?:constant|reference)|The reference \S+ was not found|Cannot find an? (?:instance|lemma)", re.I), 8),
-    ("incomplete-proof", re.compile(r"Attempt to save an incomplete proof|There are still unproven goals|remaining open goals", re.I), 9),
+        r"\biNext\b|▷|\blater\b|\btimeless\b|\bMaybeIntoLaterN\b|is not later|"
+        r"\biModIntro\b[^\n]*not a modality|goal is not a modality|\bIntoModal\b", _I), 5),
+    ("persistent-vs-spatial", re.compile(r"not persistent|\bIntoPersistent\b|Persistent .* instance|intuitionistic context", _I), 6),
+    ("evaluation-position", re.compile(r"\bwp_(?:bind|pure|apply)\b[^\n]*cannot find|is not a redex|not a value|no (?:such )?evaluation context", _I), 9),
+    ("retrieval", re.compile(r"was not found in the current environment|Unknown (?:constant|reference)|The reference \S+ was not found|Cannot find an? (?:instance|lemma)", _I), 8),
+    ("incomplete-proof", re.compile(r"Attempt to save an incomplete proof|There are still unproven goals|remaining open goals", _I), 9),
     ("permission-denied", re.compile(
         r"requires approval|permission to use|was not granted|blocked by the permission|"
-        # The CLI's actual wording, which the rule above never matched: a blocked
-        # `ls` was filed as an unclassified proof failure seven times.
-        r"was blocked\. For security|command contains multiple operations", re.I), 20),
-    ("unification-failure", re.compile(r"Unable to unify|cannot unify|not.*convertible|iApply.*failed|no matching clauses|Impossible to unify", re.I), 6),
-    ("prophecy-atomicity", re.compile(r"atomic_update|AU |wp_resolve|NewProph|Resolve|commit point|atomic.*abort", re.I), 3),
-    ("premature-consumption", re.compile(r"was consumed at step|repair class: (?:split-differently|frame-later)|no such (?:hypothesis|ident)|not found in the context", re.I), 7),
-    # The single commonest *statement* defect on these developments, and the one that
-    # poisoned a whole seqlock_wf rung: `z = 1 + Z.of_nat ver` parses in `nat_scope`
-    # and does not elaborate. It was invisible in the report because Rocq prints the
-    # whole environment before the complaint, so the capture kept the dump and lost
-    # the verb -- see `collapse_environment`.
+        r"was blocked\. For security|command contains multiple operations", _I), 20),
+    ("unification-failure", re.compile(r"Unable to unify|cannot unify|\bnot\b.*\bconvertible\b|\biApply\b.*\bfailed\b|no matching clauses|Impossible to unify", _I), 6),
+    # Case-sensitive on purpose: `Resolve` matched "unresolved" and `AU ` matched "au".
+    ("prophecy-atomicity", re.compile(r"\batomic_update\b|\bAU\b|\bwp_resolve\b|\bNewProph\b|\bResolve\b|commit point|\batomic\b.*\babort\b"), 3),
+    ("premature-consumption", re.compile(r"was consumed at step|repair class: (?:split-differently|frame-later)|no such (?:hypothesis|ident)|not found in the context", _I), 7),
     ("scope-or-type-error", re.compile(
         r'The term "[^"]*" has type "[^"]*" while it is expected to have type|'
         r"has type .{0,40} while it is expected to have type|"
         r"Illegal application|Non-functional construction|"
-        r"is expected to have type \"?nat|cannot be applied to", re.I), 8),
-    ("specialization", re.compile(
-        r"iSpecialize[^\n]*(?:cannot instantiate|not found|could not)", re.I), 7),
-    # The state layer failing is not the same as a proof failing, and on the run that
-    # made this visible it was *downstream* of a design that did not compile: 13
-    # `proof_open` failures, every one of them the poisoned file rather than a lemma.
-    # Worth its own class precisely because the state layer is what is being ablated.
+        r'is expected to have type "?nat|cannot be applied to', _I), 8),
+    ("specialization", re.compile(r"\biSpecialize\b[^\n]*(?:cannot instantiate|not found|could not)", _I), 7),
     ("state-tool-error", re.compile(
-        r"Error executing tool (?:mcp__pcp__)?\w+|pet-server|petanque|"
-        r"no petanque binary|state \d+ is no longer in the LRU", re.I), 12),
+        r"Error executing tool (?:mcp__pcp__)?\w+|\bpet-server\b|\bpetanque\b|"
+        r"no petanque binary|state \d+ is no longer in the LRU", _I), 12),
     ("focus-or-bullet", re.compile(
-        r"proof is focused, but cannot be unfocused|"
-        r"Wrong bullet|No such (?:bullet|goal)|"
-        r"[Tt]his subproof is complete|not the last goal", re.I), 8),
-    # -- pipeline ----------------------------------------------------------
-    ("gate-violation", re.compile(r"no new Admitted|escape hatches|ambient-state hygiene|axiom hygiene|statement pinning", re.I), 9),
-    ("protocol-violation", re.compile(r"produced no answer\.json|malformed answer\.json|no fenced proof block|no scripted answer", re.I), 9),
-    # The decomposer's parser rejects on *shape*, and that verdict is definite: it
-    # says exactly what was wrong and no reading of the transcript can overturn it.
-    # Left to compete on weight, a round that died on a pair of braces was filed as
-    # `mask-arithmetic`, because the design prose it was rejected for contains masks.
+        r"proof is focused, but cannot be unfocused|Wrong bullet|No such (?:bullet|goal)|"
+        r"[Tt]his subproof is complete|not the last goal", _I), 8),
+    # Only a failing line of the gate report -- the names appear in every report.
+    ("gate-violation", re.compile(
+        r"^\s*\[FAIL\] (?:no new Admitted|no escape hatches|ambient-state hygiene|axiom hygiene|"
+        r"statement pinning|`Proof using` discipline|body is a single proof|design contract)", _M), 9),
+    ("protocol-violation", re.compile(
+        r"produced no answer\.json|malformed answer\.json|no fenced proof block|no scripted answer|"
+        r"wrote no answer\.json|qed with no proof body", _I), 9),
     ("protocol-violation", re.compile(
         r"must be an object|must be a list|is not a Rocq identifier|is not an identifier|"
-        r"has no statement|has no text|produced no JSON object|is not a Require line", re.I), 19),
-    ("deadline", re.compile(r"exceeded its .* deadline|timed out|Timeout", re.I), 8),
-    ("no-progress", re.compile(r"showed no progress|loop detected|state hash repeat", re.I), 8),
-    # Infrastructure failures outrank everything: a sandbox that cannot start looks
-    # exactly like a worker that produced no answer, and blaming the worker sends you
-    # to debug the prompt instead of the harness.  (This rule exists because that is
-    # precisely what happened on the first benchmark run.)
+        r"has no statement|has no text|produced no JSON object|is not a Require line", _I), 19),
+    # The runner's own wording only; a Rocq `Timeout` and the gate's coqc timeout are not
+    # the worker's deadline.
+    ("deadline", re.compile(r"exceeded its \S+ deadline|killed at (?:its|the) deadline|worker (?:timed out|was killed)", _I), 8),
+    ("no-progress", re.compile(r"showed no progress|loop detected|state hash repeat", _I), 8),
     ("runner-error", re.compile(
-        # `OAuth access token has been revoked` reached the report as "the decomposer
-        # produced no JSON object to read" -- true, and useless: it sent the reader
-        # looking at the prompt when the credential had expired mid-ladder.
-        r"is not on PATH|unauthenticated|API call|provider error|rate limit|"
-        r"Failed to authenticate|access token has been revoked|401|invalid[_ ]api[_ ]key|"
-        r"bwrap:|Can't find source path|execvp|No such file or directory: '/tmp/pcp-|"
-        r"Permission denied|command not found|Input must be provided", re.I), 20),
-    ("context-pollution", re.compile(r"context (?:window|length) exceeded|too many tokens|prompt is too long", re.I), 10),
+        r"is not on PATH|\bunauthenticated\b|API call failed|provider error|rate limit|"
+        r"Failed to authenticate|access token has been revoked|\bHTTP 401\b|\bstatus 401\b|"
+        r"\b401 Unauthorized\b|invalid[_ ]api[_ ]key|^bwrap:|Can't find source path|\bexecvp\b|"
+        r"No such file or directory: '/tmp/pcp-|command not found|Input must be provided|"
+        + re.escape(GATE_COULD_NOT_RUN) + r"|no coqc on PATH", _I | _M), 20),
+    ("context-pollution", re.compile(r"context (?:window|length) exceeded|too many tokens|prompt is too long", _I), 10),
 ]
 
-#: Classes a *transcript* may establish on its own, against evidence that already
-#: says something.  These are the harness failing underneath the worker, and the
-#: transcript is usually the only place they surface at all -- a sandbox that cannot
-#: start looks exactly like a worker that produced no answer.  The rest of the
-#: taxonomy describes a proof going wrong, and a transcript is mostly the worker's
-#: own prose: Iris vocabulary there says what it was writing about, not what failed.
-_FROM_CONTEXT = frozenset(
-    {"runner-error", "permission-denied", "context-pollution", "deadline", "no-progress"}
-)
+#: Classes a *transcript* may establish on its own against evidence that already says
+#: something: the harness failing underneath the worker.  Iris vocabulary in a
+#: transcript says what the worker wrote about, not what failed.
+_FROM_CONTEXT = frozenset({"runner-error", "permission-denied", "context-pollution", "deadline", "no-progress"})
 
-#: Rocq's syntax errors are almost always the *worker's* formatting, not a reasoning
-#: failure, and lumping them in with retrieval failures would flatter the tooling.
-_SYNTAX = re.compile(r"Syntax error|expected after|Illegal begin of|Unexpected token", re.I)
-
-#: Tool results that are not error reports at all.  A worker that greps a source file
-#: gets its contents back, and a docstring mentioning "Error" is not an error -- one
-#: run classified a chunk of `gate.py` as a proof failure.
+_SYNTAX = re.compile(r"Syntax error|expected after|Illegal begin of|Unexpected token", _I)
+#: Tool results that are file contents, not error reports (a markdown heading is fine).
 _NOT_AN_ERROR = re.compile(
-    # `in line: 545 return ...` is a grep hit reported mid-string rather than at the
-    # start of one, so the `^\s*\d+[:\t]` anchor missed it and a chunk of this very
-    # file was recorded as a proof failure.
-    # `Exit code 1` followed by a bare file listing is the worker running `ls` in its
-    # own workdir, not a proof failure -- 36 records in one rwcas run were noise of
-    # this kind, in the very report the noise makes harder to read.
-    r'^\s*(?:"""|\#|/\*)|^\s*\d+[:\t]|\bin line:|PLAN\.md|def \w+\(|import \w+'
-    r'|^\s*Exit code \d+\s*$', re.M
+    r'^\s*(?:"""|/\*)|^\s*\d+[:\t]|\bin line:|PLAN\.md|def \w+\(|^\s*import \w+|^\s*Exit code \d+\s*$', _M
 )
-
-#: The packet's own filenames.  A line made only of these is a directory listing.
 _PACKET_FILES = ("_CoqProject", "pcp-node.json", "TASK.md", "answer.json", "proof.v", ".mcp.json")
-
-
-#: How Rocq's type errors actually start complaining, after the environment dump.
 _COMPLAINT = (
     r"(?:The term\b|Unable to unify\b|Cannot \w|Illegal\b|The reference\b|Found no\b"
     r"|Impossible to unify\b|In the projection\b|No such\b|The command has indeed failed\b)"
 )
 _ENVIRONMENT_DUMP = re.compile(r"In environment\b.*?(?=" + _COMPLAINT + ")", re.S)
-
-
-#: `pcp check` appends its own diagnosis to a failing compile, and a JSON tool result
-#: carries it in a `"diagnosis"` field. That text is *ours*: it names modalities, mask
-#: arithmetic and candidate tactics by design, so classifying it labels the failure
-#: with whatever our diagnostic vocabulary happened to mention rather than with what
-#: went wrong. Measured: an `iIntro` failure became `mask-arithmetic` this way.
 _DIAGNOSIS_FIELD = re.compile(r'["\']?diagnosis["\']?\s*:\s*"(?:[^"\\]|\\.)*"', re.S)
+_NO_ANSWER = re.compile(r"produced no answer\.json|wrote no answer\.json|produced no output|no answer", _I)
 
+
+# ------------------------------------------------------------------ preprocessing
 
 def strip_our_own_diagnosis(text: str) -> str:
-    """Drop the diagnosis `pcp check` attached, keeping the error it explains.
-
-    Same principle as the guard that stops a worker grepping `failures.py` from
-    teaching the classifier that a proof failed: the taxonomy must read the compiler,
-    never the harness.
-    """
+    """Drop the diagnosis ``pcp check`` attached: the taxonomy reads the compiler, never us."""
     return _DIAGNOSIS_FIELD.sub("", text or "")
 
 
 def collapse_environment(text: str) -> str:
-    """Drop Rocq's `In environment` binder dump, keeping the complaint after it.
-
-    A type error inside an Iris proof prints every binder and typeclass instance in
-    scope before it says what is wrong, which on these developments runs past any
-    sane capture limit. So the limit kept the dump and discarded the verb: 53 errors
-    in one run were recorded as the unclassifiable fragment `In environment Σ :
-    gFunctors`, and the thing that would have classified them -- `The term "..." has
-    type "Z" while it is expected to have type "nat"` -- was cut off.
-
-    Only collapses when a complaint is actually found after the dump; an error shaped
-    differently is left whole rather than mangled on a guess.
-    """
+    """Drop Rocq's ``In environment`` binder dump, keeping the complaint after it."""
     return _ENVIRONMENT_DUMP.sub("In environment [...] ", text or "")
+
+
+_ESCAPE = re.compile(r'\\u([0-9a-fA-F]{4})|\\(["\\/nrt])')
+_SIMPLE = {'"': '"', "\\": "\\", "/": "/", "n": "\n", "r": "\r", "t": "\t"}
+_JSON_MARKER = re.compile(r'\\u[0-9a-fA-F]{4}|\\["nt]')
+
+
+def unescape(text: str) -> str:
+    """Decode a JSON-escaped fragment (up to three layers) so Iris notation is readable.
+
+    Only text that carries a real JSON escape (``\\uXXXX``, ``\\"``, ``\\n``) is
+    touched: Rocq's own ``\\/`` in plain evidence must stay ``\\/``.
+    """
+    for _ in range(3):
+        if not _JSON_MARKER.search(text):
+            return text
+        nxt = _ESCAPE.sub(lambda m: chr(int(m.group(1), 16)) if m.group(1) else _SIMPLE[m.group(2)], text)
+        if nxt == text:
+            return text
+        text = nxt
+    return text
+
+
+def preprocess(text: str) -> str:
+    """The one preprocessing chain, used at write time and at report time alike."""
+    return collapse_environment(strip_our_own_diagnosis(unescape(text or "")))
 
 
 def looks_like_an_error(text: str) -> bool:
     """Cheap guard against classifying file contents the worker happened to read."""
     if not text or len(text.strip()) < 5:
         return False
-    if _NOT_AN_ERROR.search(text[:200]) and not re.search(r"^\s*Error:", text, re.M):
+    if _NOT_AN_ERROR.search(text[:200]) and not re.search(r"^\s*Error:", text, _M):
         return False
-    if _is_a_directory_listing(text):
-        return False
-    return True
+    return not _is_a_directory_listing(text)
 
 
 def _is_a_directory_listing(text: str) -> bool:
-    """`Exit code 1` + the packet's own filenames is a worker running `ls`."""
     words = [w for w in re.split(r"[\s,]+", text.strip()) if w]
     if not words or len(words) > 16:
         return False
@@ -218,15 +195,19 @@ def _is_a_directory_listing(text: str) -> bool:
     return hits >= 2 and hits >= len(words) - 2
 
 
-@dataclass
+# ------------------------------------------------------------------ classification
+
+@dataclass(frozen=True)
 class Finding:
     klass: str
     evidence: str = ""
-    confidence: str = "certain"
 
     @property
     def description(self) -> str:
         return TAXONOMY.get(self.klass, "")
+
+    def to_json(self) -> dict[str, str]:
+        return {"klass": self.klass, "evidence": self.evidence}
 
 
 @dataclass
@@ -241,44 +222,59 @@ class Classification:
     def classes(self) -> list[str]:
         return [f.klass for f in self.findings]
 
+    @property
+    def evidence(self) -> str:
+        return self.findings[0].evidence if self.findings else ""
+
     def render(self) -> str:
-        if not self.findings:
-            return "unclassified"
-        return ", ".join(f"{f.klass}" + ("?" if f.confidence != "certain" else "") for f in self.findings)
+        return ", ".join(self.classes) if self.findings else "unclassified"
+
+    def to_json(self) -> dict[str, Any]:
+        return {"primary": self.primary, "classes": self.classes, "evidence": self.evidence}
 
 
 def classify(
-    *sources: str | None, status: str = "stuck", context: str | None = None
+    evidence: str | None,
+    *,
+    context: str = "",
+    exit_code: int | None = None,
+    is_error: bool = False,
+    infrastructure: bool = False,
+    status: str | None = None,
 ) -> Classification:
-    """Classify one failed attempt from whatever text is available.
+    """Classify one failed attempt.
 
-    Pass the worker's evidence, the gate's report and the raw compiler output; the
-    order does not matter.  Returns every class that fired, most specific first.
-
-    `context` is the worker's transcript, and it is deliberately weaker than the
-    rest: it is consulted only when nothing else fired.  A transcript is mostly the
-    worker's own writing, and Iris writing is full of the words the taxonomy matches
-    on -- a decomposer round rejected for malformed JSON was filed as
-    `mask-arithmetic`, with a lemma statement *it had proposed* quoted back as the
-    evidence.  A taxonomy that confident about the wrong thing is worse than
-    `unclassified`, because the whole point of it is to say what to build next.
+    ``evidence`` is what the attempt reported (worker evidence, gate report, compiler
+    output -- already joined); ``context`` is the transcript, which may only establish
+    harness failures unless nothing else fired.  ``exit_code`` (the runner process),
+    ``is_error`` (``NodeResult.status == "error"``) and ``infrastructure`` (the gate
+    could not run) are structured inputs that outrank every regex.
     """
     if status == "contested":
-        return Classification([Finding("contested")])
-    primary = "\n".join(s for s in sources if s)
-    found = _classify_text(primary)
-    if not context:
+        return Classification([Finding("contested", "the worker argued the statement itself is wrong")])
+    if status == "error":
+        is_error = True
+    text = preprocess(evidence or "")
+    infra: Finding | None = None
+    if infrastructure:
+        infra = Finding("runner-error", "the gate could not run (infrastructure); the worker is not to blame")
+    elif is_error:
+        infra = Finding("runner-error", "the runner reported an infrastructure error: " + _tail(text, 120))
+    elif exit_code not in (None, 0) and (not text.strip() or _NO_ANSWER.search(text)):
+        infra = Finding("runner-error", f"the runner exited with status {exit_code} and no answer was produced")
+    found = _classify_text(text)
+    if context:
+        widened = _classify_text(text + "\n" + preprocess(context) if text.strip() else preprocess(context))
+        if found.primary == "unclassified" or widened.primary in _FROM_CONTEXT:
+            found = widened
+    if infra is None:
         return found
-    widened = _classify_text("\n".join(x for x in (primary, context) if x))
-    # With no evidence at all the transcript is all there is -- often it holds the
-    # compiler error the worker never got to report.
-    if found.primary == "unclassified":
-        return widened
-    # Otherwise the transcript may only reveal the harness failing underneath the
-    # worker, never re-diagnose the proof.
-    if widened.primary in _FROM_CONTEXT:
-        return widened
-    return found
+    rest = [f for f in found.findings if f.klass not in ("runner-error", "unclassified")]
+    if is_error and not infrastructure and exit_code in (None, 0) and found.primary == "protocol-violation":
+        # A malformed answer recorded with status ``error`` (the decomposer files its
+        # proposal violations that way) is a shape problem first, an outage second.
+        return Classification([rest[0], infra, *rest[1:]])
+    return Classification([infra, *rest])
 
 
 def _classify_text(text: str) -> Classification:
@@ -286,21 +282,26 @@ def _classify_text(text: str) -> Classification:
         return Classification([Finding("unclassified", "no evidence was recorded")])
     if not looks_like_an_error(text):
         return Classification([Finding("unclassified", "not an error report: " + _tail(text, 80))])
-
     hits: list[tuple[int, Finding]] = []
     for klass, pattern, weight in _RULES:
         m = pattern.search(text)
         if m:
-            hits.append((weight, Finding(klass, _context(text, m))))
+            hits.append((weight, Finding(klass, _window(text, m))))
     if not hits:
         if _SYNTAX.search(text):
             return Classification([Finding("protocol-violation", "Rocq syntax error in the worker's script")])
         return Classification([Finding("unclassified", _tail(text))])
     hits.sort(key=lambda h: -h[0])
-    return Classification([f for _, f in hits])
+    seen: set[str] = set()
+    findings = []
+    for _w, f in hits:
+        if f.klass not in seen:
+            seen.add(f.klass)
+            findings.append(f)
+    return Classification(findings)
 
 
-def _context(text: str, m: re.Match[str], width: int = 90) -> str:
+def _window(text: str, m: re.Match[str], width: int = 90) -> str:
     start = max(0, m.start() - width // 2)
     return " ".join(text[start : m.end() + width // 2].split())
 
@@ -309,7 +310,43 @@ def _tail(text: str, n: int = 200) -> str:
     return " ".join(text.strip().split())[-n:]
 
 
-# ------------------------------------------------------------------- aggregation
+# ------------------------------------------------------------------ records
+
+def gate_infrastructure(checks: Iterable[dict[str, Any]]) -> bool:
+    """Whether a stored ``gate_checks`` list says the gate could not run."""
+    for c in checks or []:
+        if str(c.get("name", "")).startswith("compiles") and str(c.get("detail", "")).startswith(GATE_COULD_NOT_RUN):
+            return True
+    return False
+
+
+def record_evidence(rec: dict[str, Any]) -> str:
+    """The evidence text a record is classified on: worker evidence, gate report, compiler tail."""
+    parts = [rec.get("evidence") or "", rec.get("gate_report") or "", rec.get("compile_output") or ""]
+    return "\n".join(p for p in parts if p)
+
+
+def classify_record(rec: dict[str, Any]) -> Classification:
+    """Classify a record dict with the same inputs at write time and at report time."""
+    return classify(
+        record_evidence(rec),
+        context=rec.get("transcript_tail") or "",
+        exit_code=rec.get("exit_code"),
+        status=rec.get("status") or "stuck",
+        infrastructure=gate_infrastructure(rec.get("gate_checks") or []),
+    )
+
+
+def friction_classes(rec: dict[str, Any]) -> list[tuple[str, str]]:
+    """``(class, text)`` for every error the worker hit *and recovered from*."""
+    out: list[tuple[str, str]] = []
+    for err in (rec.get("trace") or {}).get("errors", []) or []:
+        text = preprocess(str(err))
+        if not looks_like_an_error(text):
+            continue
+        out.append((classify(text).primary, text))
+    return out
+
 
 @dataclass
 class FailureReport:
@@ -318,9 +355,6 @@ class FailureReport:
     primary: Counter = field(default_factory=Counter)
     all_classes: Counter = field(default_factory=Counter)
     examples: dict[str, list[str]] = field(default_factory=dict)
-    #: Classes workers hit and *recovered from*.  Counted separately because they
-    #: are the cheapest wins available: the capability is already there, the tooling
-    #: is just making it pay for it in turns.
     friction: Counter = field(default_factory=Counter)
     friction_examples: dict[str, list[str]] = field(default_factory=dict)
     turns: list[int] = field(default_factory=list)
@@ -330,10 +364,7 @@ class FailureReport:
         failed = self.total - self.solved
         lines = [f"{self.solved}/{self.total} solved · {failed} failed"]
         if self.turns or self.checks:
-            lines.append(
-                f"  effort: {_mean(self.turns):.1f} turns, {_mean(self.checks):.1f} "
-                "gate checks per attempt"
-            )
+            lines.append(f"  effort: {_mean(self.turns):.1f} turns, {_mean(self.checks):.1f} gate checks per attempt")
         if self.primary:
             lines.append("")
             lines.append("failures, by primary class:")
@@ -358,47 +389,21 @@ class FailureReport:
             lines.append("  (nothing to report -- no failures and no recorded friction)")
         return "\n".join(lines)
 
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "total": self.total,
+            "solved": self.solved,
+            "primary": dict(self.primary),
+            "all_classes": dict(self.all_classes),
+        }
+
 
 def _mean(values: list[int]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-_ESCAPE = re.compile(r'\\u([0-9a-fA-F]{4})|\\(["\\\\/nrt])')
-_SIMPLE = {'"': '"', "\\": "\\", "/": "/", "n": "\n", "r": "\r", "t": "\t"}
-_UNICODE_ESCAPE = re.compile(r"\\u[0-9a-fA-F]{4}")
-
-
-def unescape(text: str) -> str:
-    """Decode a JSON-escaped fragment so the classifier can read it.
-
-    The state tools return JSON, and a failing `proof_step` reaches the trace as the
-    body of a JSON string: `iMod: cannot eliminate modality\\n(\\u25b7 inv)`. Every
-    rule in this file is written against Iris' actual notation, so `\\u25b7` matched
-    nothing and the largest bucket in one rwcas report was `unclassified` -- the
-    tools' own output, invisible to the tooling meant to read it.
-
-    Not `json.loads`: these are fragments of a larger document and frequently have
-    unbalanced quotes, so only the escapes are decoded and everything else is left
-    exactly as it is.
-    """
-    # Doubly escaped in practice: the tool's JSON is embedded in the trace's JSON, so
-    # the notation arrives as `\\u2217`. One pass turns that into `\u2217`, which is
-    # still not `∗`. Repeat while an escape sequence survives, bounded, and stop the
-    # moment a pass changes nothing -- a lone backslash in a path must come out whole.
-    for _ in range(3):
-        if "\\" not in text:
-            break
-        nxt = _ESCAPE.sub(
-            lambda m: chr(int(m.group(1), 16)) if m.group(1) else _SIMPLE[m.group(2)], text
-        )
-        if nxt == text or not _UNICODE_ESCAPE.search(nxt):
-            return nxt
-        text = nxt
-    return text
-
-
-def summarize(records: Iterable[dict]) -> FailureReport:
-    """Aggregate per-attempt records into a work queue."""
+def summarize(records: Iterable[dict[str, Any]]) -> FailureReport:
+    """Aggregate per-attempt records into a work queue (same classifier as the writer)."""
     report = FailureReport()
     for rec in records:
         report.total += 1
@@ -407,32 +412,17 @@ def summarize(records: Iterable[dict]) -> FailureReport:
             report.turns.append(int(trace["turns"]))
         if trace.get("check_iterations") is not None:
             report.checks.append(int(trace["check_iterations"]))
-        for err in trace.get("errors", []):
-            # Guarded here as well as at capture time. The capture-time guard only
-            # protects records written *after* it lands, and the report is exactly
-            # where the noise does its damage -- it crowds out the findings it is
-            # printed next to.
-            text = collapse_environment(strip_our_own_diagnosis(unescape(str(err))))
-            if not looks_like_an_error(text):
-                continue
-            c = classify(text)
-            report.friction[c.primary] += 1
-            report.friction_examples.setdefault(c.primary, []).append(
+        for klass, text in friction_classes(rec):
+            report.friction[klass] += 1
+            report.friction_examples.setdefault(klass, []).append(
                 f"{rec.get('lemma', '?')}: {' '.join(text.split())[:120]}"
             )
         if rec.get("solved"):
             report.solved += 1
             continue
-        c = classify(
-            collapse_environment(strip_our_own_diagnosis(unescape(rec.get("evidence") or ""))),
-            rec.get("gate_report"),
-            rec.get("compile_output"),
-            rec.get("transcript_tail"),
-            status=rec.get("status", "stuck"),
-        )
+        c = classify_record(rec)
         report.primary[c.primary] += 1
         for klass in c.classes:
             report.all_classes[klass] += 1
-        label = f"{rec.get('lemma', '?')}: {c.findings[0].evidence if c.findings else ''}"
-        report.examples.setdefault(c.primary, []).append(label)
+        report.examples.setdefault(c.primary, []).append(f"{rec.get('lemma', '?')}: {c.evidence}")
     return report

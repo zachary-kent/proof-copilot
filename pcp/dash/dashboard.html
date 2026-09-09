@@ -81,7 +81,11 @@ function renderSnapshot(s) {
     .map(([k, v]) => `${v} ${k}`).join(' · ') || 'empty graph';
 }
 
+const seen = new Set();
 function addEvent(e) {
+  // Events carry ids; a reconnect resumes from Last-Event-ID, and this guard makes
+  // a replayed event idempotent on the page as well.
+  if (e.id !== undefined) { if (seen.has(e.id)) return; seen.add(e.id); }
   const li = document.createElement('li');
   const t = new Date(e.ts * 1000).toLocaleTimeString();
   li.innerHTML = `${t} <b>${esc(e.kind)}</b> ${esc(e.node || '')} ${esc(summarise(e.payload))}`;
@@ -95,7 +99,7 @@ function summarise(p) {
     .map(([k, v]) => `${k}=${String(v).slice(0, 60)}`).join(' ');
 }
 
-const esc = (s) => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 fetch('/api/graph').then(r => r.json()).then(renderSnapshot).catch(() => {});
 const es = new EventSource('/events');

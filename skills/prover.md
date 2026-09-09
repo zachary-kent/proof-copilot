@@ -79,5 +79,40 @@ Run `pcp check`. It runs the same deterministic gate the orchestrator runs: comp
 `Print Assumptions`, no new admits, no global registrations. "It compiled for me" and
 "it passed the gate" must be the same sentence. Then write `answer.json` and stop.
 
+Run every command in the foreground and wait for it. Your session is headless: a
+background task, a scheduled wake-up, or ending your turn "to wait" ends the session
+and the attempt is lost with it.
+
 Do not keep going to polish. Do not prove neighbouring lemmas you noticed. A proved
 lemma nothing demands is measured as zero progress.
+
+## When the invariant lacks a fact
+
+Sometimes the proof is right and the design is short one conjunct: the invariant
+stores `Q` where the close site needs `▷ Q`, or a fact you can see is true at every
+step is simply not recorded. That is not a reason to contest the statement, and it
+is never a reason to edit the definition yourself (the gate discards it).
+
+Ask for it. In your `stuck` answer, add an `amendments` entry naming the definition,
+the fact, and the goal where you needed it:
+
+```json
+{"status": "stuck", "evidence": "...",
+ "amendments": [{"definition": "my_inv", "add": "▷ Q",
+                 "at": "closing the invariant after the CmpXchg", "why": "the registry stores Q, the close site has ▷ Q"}]}
+```
+
+`add` is one conjunct joined onto the definition's body as `(body) ∗ (add)` -- one
+term, inside its own parentheses; a conjunct whose parentheses escape the group is
+refused before anything is compiled. It must compile against the contract, and it
+is read by the approver before it is applied; then every proof that depends on it is
+replayed and you get the node back with the change spelled out. `replace` (the
+complete new `Definition ... .` sentence) is for anything else and is reviewed the
+same way. Do not ask for a *weaker* invariant this way -- that is `contested` -- and
+do not ask for a conjunct that makes the invariant unsatisfiable (`False`,
+`⌜0 = 1⌝`): a specification proved from a hypothesis nothing can establish is not a
+result, the approver rejects it, and the refusal comes back as your evidence.
+
+Keep proving the branches that do not need the fact first. A partial proof is kept:
+your next attempt starts from it, not from `admit.`, and the goal at the site where
+you stopped will have the fact in it.

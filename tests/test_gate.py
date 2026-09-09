@@ -1,240 +1,367 @@
-"""The integrity gate (PLAN.md 8.7), against real Rocq.
-
-An agent-built development can be fully `Qed`-clean and still worthless, because the
-kernel checks proofs, not statements.  Each test here corresponds to a specific way
-that goes wrong.
-"""
+"""pcp.orch.gate: static checks, structural recheck, compile, assumptions, immutability."""
 
 from __future__ import annotations
 
+import dataclasses
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
+from pcp.errors import GateError
+from pcp.orch import gate as gate_mod
+from pcp.orch.contract import DesignContract
+from pcp.orch.failures import GATE_COULD_NOT_RUN
+from pcp.orch.gate import (
+    CHECK_AMBIENT,
+    CHECK_AXIOMS,
+    CHECK_AXIOMS_DESIGN,
+    CHECK_COMPILES,
+    CHECK_CONTRACT,
+    CHECK_ESCAPE,
+    CHECK_NO_ADMIT,
+    CHECK_PINNING,
+    CHECK_PROOF_USING,
+    CHECK_STRUCTURE,
+    CHECK_STUBS,
+    CHECK_UNUSED,
+    DEFAULT_AXIOM_WHITELIST,
+    Gate,
+    GateResult,
+    static_checks,
+)
+from pcp.rocq.assemble import Development, NodeSpec
+from pcp.rocq.project import CompileResult
 from tests.conftest import needs_rocq
 
+PLAIN = """(* a plain development, no Iris *)
+Set Default Proof Using "Type".
 
-@pytest.fixture(scope="module")
-def dev(scratch_dir: Path):
-    from pcp.orch.assemble import Development
-
-    return Development(scratch_dir / "Basic.v")
-
-
-@pytest.fixture(scope="module")
-def gate(dev):
-    from pcp.orch.gate import Gate
-
-    return Gate(dev)
-
-
-# ----------------------------------------------------------------- static checks
-
-def test_static_checks_reject_admits_hatches_and_globals(gate) -> None:
-    checks = {c.name: c for c in gate.static_checks({
-        "a": "iIntros. admit.",
-        "b": "Unset Universe Checking. iIntros.",
-        "c": "Global Instance foo : True := I.",
-    })}
-    assert not checks["no new Admitted / admit / Axiom / Parameter"].ok
-    assert not checks["no escape hatches"].ok
-    assert not checks["ambient-state hygiene (no global Instance/Hint/Notation/Ltac)"].ok
-
-
-def test_static_checks_ignore_the_words_inside_comments(gate) -> None:
-    checks = {c.name: c for c in gate.static_checks({"a": "(* we could admit here *) iIntros. iFrame."})}
-    assert checks["no new Admitted / admit / Axiom / Parameter"].ok
-
-
-def test_local_registrations_are_allowed(gate) -> None:
-    """Node-local helpers are unrestricted; only *global* registration is a spec change."""
-    checks = {c.name: c for c in gate.static_checks({"a": "Local Ltac t := iFrame.\nt."})}
-    assert checks["ambient-state hygiene (no global Instance/Hint/Notation/Ltac)"].ok
-
-
-def test_a_disqualified_patch_never_pays_for_a_compile(gate) -> None:
-    result = gate.run("sep_comm", [], target_body="admit.")
-    assert not result.ok
-    compile_check = next(c for c in result.checks if c.name == "compiles (coqc)")
-    assert "skipped" in compile_check.detail
-    assert result.elapsed_s < 1.0
-
-
-# ------------------------------------------------------------------- with Rocq
-
-@needs_rocq
-def test_a_correct_proof_passes_and_prints_clean_assumptions(gate) -> None:
-    result = gate.run("sep_comm", [], target_body='iIntros "[HP HQ]". iFrame.')
-    assert result.ok, result.render()
-    assert result.assumptions == {"sep_comm": []}
-
-
-@needs_rocq
-def test_a_wrong_proof_fails_with_the_first_error(gate) -> None:
-    result = gate.run("sep_comm", [], target_body='iIntros "[HP HQ]". done.')
-    assert not result.ok
-    compile_check = next(c for c in result.checks if c.name == "compiles (coqc)")
-    assert not compile_check.ok
-    assert "Error" in result.compile_output
-
-
-@needs_rocq
-def test_proving_against_an_admitted_stub_is_allowed_and_reported(gate) -> None:
-    """Claim 1: a proof against a type-checked stub is the work that survives."""
-    from pcp.orch.assemble import NodeSpec
-
-    child = NodeSpec(
-        name="comm_helper",
-        statement="Lemma comm_helper (P Q : iProp Σ) : P ∗ Q -∗ Q ∗ P.",
-        body=None,
-    )
-    result = gate.run("sep_comm", [child], target_body="iApply comm_helper.")
-    assert result.ok, result.render()
-    assert result.assumptions["sep_comm"] == ["comm_helper"]
-    leaning = next(c for c in result.checks if c.name == "rests on open stubs")
-    assert leaning.advisory and "comm_helper" in leaning.detail
-
-
-@needs_rocq
-def test_statement_pinning_holds_for_an_injected_child(gate) -> None:
-    from pcp.orch.assemble import NodeSpec
-
-    child = NodeSpec(
-        name="pinned_child",
-        statement="Lemma pinned_child (P : iProp Σ) : P -∗ P.",
-        body='iIntros "H". iFrame.',
-    )
-    result = gate.run("sep_comm", [child], target_body=None, target="pinned_child")
-    pin = next(c for c in result.checks if c.name == "statement pinning by construction")
-    assert pin.ok
-    assert child.statement in result.assembled
-
-
-@needs_rocq
-def test_the_unused_premise_probe_finds_a_real_one_and_no_others(gate) -> None:
-    """The removal probe is ground truth: restate without the premise and re-run."""
-    over = gate.run("over_strong", [], target_body='iIntros "HP". iFrame.', unused_premise_report=True)
-    assert over.unused_premises == ["Hn"], over.render()
-    tight = gate.run("sep_comm", [], target_body='iIntros "[HP HQ]". iFrame.', unused_premise_report=True)
-    assert tight.unused_premises == []
-    # It is advisory: an over-strong statement still gates.
-    assert over.ok
-
-
-@needs_rocq
-def test_proof_using_is_injected(gate) -> None:
-    from pcp.orch.assemble import PROOF_USING_DIRECTIVE
-
-    result = gate.run("sep_comm", [], target_body='iIntros "[HP HQ]". iFrame.')
-    assert PROOF_USING_DIRECTIVE in result.assembled
-
-
-def test_assumption_parsing_refuses_to_misattribute() -> None:
-    """Wrong attribution is worse than none: mismatched counts return nothing."""
-    from pcp.orch.gate import parse_assumptions
-
-    out = "Closed under the global context\nAxioms:\nfoo : nat\n"
-    assert parse_assumptions(out, ["a", "b"]) == {"a": [], "b": ["foo"]}
-    assert parse_assumptions(out, ["a"]) == {}
-    assert parse_assumptions("", ["a"]) == {}
-
-
-def test_warnings_are_not_mistaken_for_axioms() -> None:
-    from pcp.orch.gate import parse_assumptions
-
-    out = "Axioms:\nfoo : nat\n\nWarning: Deprecated environment variable COQPATH\n"
-    assert parse_assumptions(out, ["a"]) == {"a": ["foo"]}
-
-
-# --------------------------------------------------------------- prefix stubbing
-
-def test_stubbing_the_prefix_keeps_statements_and_drops_bodies() -> None:
-    from pcp.orch.assemble import stub_proof_bodies
-
-    src = (
-        "Lemma a : True.\nProof. exact I. Qed.\n\n"
-        "Definition d : nat.\nProof. exact 0. Defined.\n\n"
-        "Lemma b : True.\nProof. Admitted.\n"
-    )
-    out, stubbed = stub_proof_bodies(src)
-    assert stubbed == ["a"]
-    assert "Lemma a : True." in out and "exact I." not in out
-    # Transparent proofs are left alone: a dependent may need to compute with them.
-    assert "exact 0." in out and "Defined." in out
-    # Already-admitted blocks are untouched.
-    assert out.count("Admitted.") == 2
-
-
-def test_stubbing_can_keep_named_blocks() -> None:
-    from pcp.orch.assemble import stub_proof_bodies
-
-    src = "Lemma a : True.\nProof. exact I. Qed.\nLemma b : True.\nProof. exact I. Qed.\n"
-    out, stubbed = stub_proof_bodies(src, keep={"b"})
-    assert stubbed == ["a"]
-    assert out.count("exact I.") == 1
-
-
-@needs_rocq
-def test_the_fast_and_full_paths_agree_on_accept_and_reject(dev, gate) -> None:
-    """Stubbing must change the cost of the check, not its verdict."""
-    good = 'iIntros "[HP HQ]". iFrame.'
-    bad = 'iIntros "[HP HQ]". done.'
-    for body, expected in ((good, True), (bad, False)):
-        fast = gate.run("sep_comm", [], target_body=body, stub_prefix=True)
-        full = gate.run("sep_comm", [], target_body=body, stub_prefix=False)
-        assert fast.ok is expected, fast.render()
-        assert full.ok is expected, full.render()
-
-
-@needs_rocq
-def test_stubbed_siblings_are_allowed_assumptions(dev, gate) -> None:
-    """The target legitimately rests on the stubs, and the gate says so rather than
-    failing on axiom hygiene."""
-    result = gate.run("load_twice", [], target_body='iIntros "Hl". wp_load. wp_seq. wp_load. iFrame. done.',
-                      stub_prefix=True)
-    assert result.ok, result.render()
-
-
-# ------------------------------------------------------------------ design mode
-
-DESIGN_SRC = """\
-Definition prog : val := #0.
-Definition inv_pred (n : nat) : Prop := True.
-Lemma spec (n : nat) : inv_pred n.
+Lemma target (P : Prop) : P -> P.
 Proof.
-Admitted.
+  intros H. exact H.
+Qed.
 """
 
+MODULE = """Set Default Proof Using "Type".
+Module M.
+Lemma target (n : nat) : n = n.
+Proof.
+  reflexivity.
+Qed.
+End M.
+"""
 
-def test_run_design_gates_a_whole_file_against_the_contract(dev, gate) -> None:
-    """A design task cannot be gated by proof-body spans -- filling in an invariant
-    means editing definitions -- so the contract does it instead."""
-    from pcp.orch.contract import DesignContract
+CLASSIC = """From Stdlib Require Import Classical_Prop.
+Set Default Proof Using "Type".
 
-    contract = DesignContract.from_names(["over_strong"])
-    unchanged = dev.source
-    result = gate.run_design(unchanged, contract, check_assumptions=False)
-    contract_check = next(
-        c for c in result.checks if c.name.startswith("design contract")
-    )
-    assert contract_check.ok
+Lemma target (P : Prop) : P \\/ ~ P.
+Proof.
+  apply classic.
+Qed.
+"""
 
-    edited = unchanged.replace(
-        'Definition new_rwcas', 'Definition tampered'
-    ) if "new_rwcas" in unchanged else unchanged.replace(
-        "Lemma sep_comm", "Lemma sep_comm_renamed"
-    )
-    bad = gate.run_design(edited, contract, check_assumptions=False)
-    assert not bad.ok
+WRAPPED_STUB = (
+    "Lemma stub_wrapped (A_long_type_name : Type) (B_long_type_name : A_long_type_name -> Type) "
+    "(f_function_name g_function_name : forall x : A_long_type_name, B_long_type_name x) : "
+    "(forall x, f_function_name x = g_function_name x) -> f_function_name = g_function_name."
+)
 
 
-def test_run_design_defaults_proved_to_whatever_the_file_closes(dev, gate) -> None:
-    from pcp.orch.contract import DesignContract
+def _dev(tmp_path: Path, source: str = PLAIN, name: str = "Dev.v") -> Development:
+    (tmp_path / "_CoqProject").write_text("-Q . dev\n")
+    path = tmp_path / name
+    path.write_text(source)
+    return Development(path)
 
-    result = gate.run_design(
-        "Lemma a : True.\nProof. exact I. Qed.\n",
-        DesignContract.from_names([]),
-        check_assumptions=False,
-    )
-    # It reports a contract violation (everything was deleted), not a crash.
-    assert not result.ok
+
+def _by_name(result: GateResult) -> dict[str, gate_mod.Check]:
+    return {c.name: c for c in result.checks}
+
+
+# ------------------------------------------------------------------ static checks
+
+def _one(bodies):
+    return {c.name: c for c in static_checks(bodies)}
+
+
+def test_static_check_names_and_order():
+    assert [c.name for c in static_checks({"x": "exact I."})] == [CHECK_NO_ADMIT, CHECK_ESCAPE, CHECK_AMBIENT]
+    assert all(c.ok for c in static_checks({"x": "exact I."}))
+
+
+def test_abort_and_redefinition_fail_check_1():
+    c = _one({"t": "Abort.\nDefinition target : nat := 0.\nLemma _d : True.\nProof. exact I."})
+    assert not c[CHECK_NO_ADMIT].ok and "Abort" in c[CHECK_NO_ADMIT].detail and "Definition" in c[CHECK_NO_ADMIT].detail
+
+
+def test_qed_then_global_notation_fails_checks_1_and_3():
+    c = _one({"t": 'exact I. Qed. Notation "\'BOX\' x" := (True) (at level 10). Lemma dummy : True. Proof. exact I.'})
+    assert not c[CHECK_NO_ADMIT].ok and "Qed" in c[CHECK_NO_ADMIT].detail
+    assert not c[CHECK_AMBIENT].ok and "Notation" in c[CHECK_AMBIENT].detail
+
+
+def test_nested_proofs_and_guard_checking_are_escape_hatches():
+    c = _one({"t": "Set Nested Proofs Allowed.\nexact I."})
+    assert not c[CHECK_ESCAPE].ok and "Nested Proofs" in c[CHECK_ESCAPE].detail and c[CHECK_NO_ADMIT].ok
+    c = _one({"t": "Unset Guard Checking.\nexact I."})
+    assert not c[CHECK_ESCAPE].ok and "Guard Checking" in c[CHECK_ESCAPE].detail
+    c = _one({"t": "Obligation Tactic := idtac.\nexact I."})
+    assert not c[CHECK_ESCAPE].ok
+    c = _one({"t": "#[bypass_check(guard)] Fixpoint f (n : nat) : nat := f n.\nexact I."})
+    assert not c[CHECK_ESCAPE].ok
+    c = _one({"t": "Set Printing All. exact I."})
+    assert all(x.ok for x in c.values())
+
+
+def test_ambient_registrations_fail_check_3_even_when_local():
+    for body in ("Local Instance foo : True := I.\nexact I.", "Global Hint Resolve x : core.\nexact I.",
+                 "#[global] Instance foo : True := I.\nexact I.", "Ltac foo := idtac.\nexact I.",
+                 "Canonical Structure foo.\nexact I.", "Coercion f : A >-> B.\nexact I."):
+        c = _one({"t": body})
+        assert not c[CHECK_AMBIENT].ok, body
+
+
+def test_idtac_injection_and_honest_bodies_pass_static_checks():
+    assert all(c.ok for c in static_checks({"t": 'idtac "Axioms:". idtac "Closed under the global context". exact I.'}))
+    assert all(c.ok for c in static_checks({"t": 'iIntros "[HA HB]". (* note (* nested *) admit later *) iFrame.'}))
+
+
+def test_unbalanced_comment_admit_and_axiom_fail_check_1():
+    assert not _one({"t": "(* a (* b *) exact I."})[CHECK_NO_ADMIT].ok
+    c = _one({"t": "iIntros. admit."})
+    assert not c[CHECK_NO_ADMIT].ok and "admit" in c[CHECK_NO_ADMIT].detail
+    assert not _one({"t": "Axiom x : False. exact x."})[CHECK_NO_ADMIT].ok
+    assert not _one({"t": "Print Assumptions target. exact I."})[CHECK_NO_ADMIT].ok
+
+
+# ------------------------------------------------------------------ result objects
+
+def test_gate_is_immutable(tmp_path):
+    g = Gate(_dev(tmp_path), extra_whitelist=["my_axiom"], timeout=5)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        g.timeout = 1  # type: ignore[misc]
+    assert not hasattr(g, "last_stdout")
+    assert "my_axiom" in g.whitelist and set(DEFAULT_AXIOM_WHITELIST) <= g.whitelist
+    assert DEFAULT_AXIOM_WHITELIST[3] == "Classical_Prop.classic"
+
+
+def test_gate_result_render_and_json_roundtrip():
+    r = GateResult(ok=False, checks=[gate_mod.Check(CHECK_NO_ADMIT, True), gate_mod.Check(CHECK_COMPILES, False, "Error: x"),
+                                     gate_mod.Check(CHECK_STUBS, True, "a (expected until they are discharged)", advisory=True),
+                                     gate_mod.Check(CHECK_UNUSED, False, "the proof does not need: n", advisory=True)],
+                   compile_output="\n".join(f"line {i}" for i in range(50)), elapsed_s=1.234)
+    text = r.render()
+    assert text.startswith("gate: FAIL (1.2s)\n  [ok ] no new Admitted / admit / Axiom / Parameter\n  [FAIL] compiles (coqc): Error: x\n")
+    assert "  [ok ] rests on open stubs: a (expected" in text and "  [warn] unused-premise report:" in text
+    assert text.endswith("line 49") and "line 9\n" not in text and "line 10\n" in text
+    js = r.to_json()
+    assert set(js) == {"ok", "elapsed_s", "checks", "assumptions", "unused_premises"}
+    assert GateResult.from_json(js).checks == r.checks and not GateResult.from_json(js).infrastructure
+    infra = GateResult(ok=False, checks=[gate_mod.Check(CHECK_COMPILES, False, f"{GATE_COULD_NOT_RUN} no coqc")])
+    assert GateResult.from_json(infra.to_json()).infrastructure
+    assert GateResult(ok=True, elapsed_s=9.8).render() == "gate: PASS (9.8s)"
+
+
+# ------------------------------------------------------------------ run() without coqc
+
+def _fake_compile(monkeypatch, **fields):
+    calls: list[str] = []
+
+    def fake(text, **kw):
+        calls.append(text)
+        return CompileResult(**{"ok": True, **fields})
+
+    monkeypatch.setattr(gate_mod, "compile_text", fake)
+    return calls
+
+
+def test_static_failure_skips_the_compile(tmp_path, monkeypatch):
+    calls = _fake_compile(monkeypatch)
+    started = time.perf_counter()
+    r = Gate(_dev(tmp_path)).run("target", [], target_body="intros H. admit.")
+    assert time.perf_counter() - started < 1.0
+    assert not r.ok and not calls
+    names = [c.name for c in r.checks]
+    assert names == [CHECK_NO_ADMIT, CHECK_ESCAPE, CHECK_AMBIENT, CHECK_PINNING, CHECK_PROOF_USING, CHECK_STRUCTURE, CHECK_COMPILES]
+    assert _by_name(r)[CHECK_COMPILES].detail == "skipped: static checks failed"
+
+
+def test_structural_recheck_catches_declaration_changes(tmp_path, monkeypatch):
+    _fake_compile(monkeypatch)
+    r = Gate(_dev(tmp_path)).run("target", [], target_body="Abort.\nLemma target : True.\nProof. exact I.")
+    c = _by_name(r)[CHECK_STRUCTURE]
+    assert not c.ok and "introduces target" in c.detail
+    r = Gate(_dev(tmp_path)).run("target", [], target_body="")
+    assert _by_name(r)[CHECK_STRUCTURE].detail == "empty proof body"
+
+
+def test_missing_coqc_and_timeout_are_infrastructure(tmp_path, monkeypatch):
+    _fake_compile(monkeypatch, ok=False, unavailable="no coqc on PATH -- run ./scripts/setup-toolchain.sh")
+    r = Gate(_dev(tmp_path)).run("target", [], target_body="intros H. exact H.")
+    assert r.infrastructure and not r.ok
+    assert _by_name(r)[CHECK_COMPILES].detail.startswith(GATE_COULD_NOT_RUN)
+    _fake_compile(monkeypatch, ok=False, timed_out=True, elapsed_s=600)
+    r = Gate(_dev(tmp_path)).run("target", [], target_body="intros H. exact H.")
+    assert r.infrastructure and "timed out" in _by_name(r)[CHECK_COMPILES].detail
+    assert CHECK_AXIOMS not in _by_name(r)
+
+
+def test_compile_error_is_the_workers_not_infrastructure(tmp_path, monkeypatch):
+    _fake_compile(monkeypatch, ok=False, stderr='File "./Dev.v", line 5:\nError: Unable to unify "a" with "b".')
+    r = Gate(_dev(tmp_path)).run("target", [], target_body="intros H. exact H.")
+    assert not r.ok and not r.infrastructure and "Unable to unify" in _by_name(r)[CHECK_COMPILES].detail
+    assert r.compile_output.endswith('with "b".')
+
+
+def test_assumptions_parsed_from_stdout_with_qualified_marker(tmp_path, monkeypatch):
+    stdout = 'Axioms:\ntarget\n     : forall P : Prop, P -> P\nAxioms:\nclassic : forall P : Prop, P \\/ ~ P\nevil : False\n'
+    _fake_compile(monkeypatch, stdout=stdout)
+    r = Gate(_dev(tmp_path)).run("target", [], target_body="intros H. exact H.")
+    c = _by_name(r)[CHECK_AXIOMS]
+    assert not c.ok and c.detail == "target: evil" and r.assumptions == {"target": ["classic", "evil"]}
+    _fake_compile(monkeypatch, stdout="garbage only")
+    r = Gate(_dev(tmp_path)).run("target", [], target_body="intros H. exact H.")
+    assert "treat as unverified" in _by_name(r)[CHECK_AXIOMS].detail and not r.ok
+
+
+def test_run_refuses_impossible_inputs(tmp_path, monkeypatch):
+    _fake_compile(monkeypatch)
+    g = Gate(_dev(tmp_path))
+    with pytest.raises(GateError):
+        g.run("missing", [], target_body="exact I.")
+    with pytest.raises(GateError):
+        g.run("target", [NodeSpec("target", "Lemma target : True.")], target_body="exact I.")
+    with pytest.raises(GateError):
+        g.run("target", [NodeSpec("child", "Lemma child : True.")], target="child")
+    with pytest.raises(GateError):
+        g.run("target", [NodeSpec("child", "Lemma child : True.", mockable=False)], target_body="exact I.")
+
+
+def test_run_design_scans_fragments_and_results(tmp_path, monkeypatch):
+    _fake_compile(monkeypatch, stdout="spec\n     : True\nClosed under the global context\n")
+    dev = _dev(tmp_path, "Set Default Proof Using \"Type\".\nDefinition value := 1.\nLemma spec : True.\nProof. exact I. Qed.\n")
+    contract = DesignContract(mutable=frozenset({"value"}), results=frozenset({"spec"}))
+    good = dev.source.replace("value := 1", "value := 2") + "Lemma helper : True.\nProof. Admitted.\n"
+    r = Gate(dev).run_design(good, contract)
+    assert not r.ok and "helper: added" in _by_name(r)[CHECK_CONTRACT].detail
+    ok = dev.source.replace("value := 1", "value := 2")
+    r = Gate(dev).run_design(ok, contract)
+    assert r.ok and [c.name for c in r.checks][-2:] == [CHECK_COMPILES, CHECK_AXIOMS_DESIGN]
+    hatch = "Set Nested Proofs Allowed.\n" + ok
+    r = Gate(dev).run_design(hatch, contract)
+    assert not _by_name(r)[CHECK_ESCAPE].ok and "Nested Proofs" in _by_name(r)[CHECK_ESCAPE].detail
+    guard = ok + "Unset Guard Checking.\n"
+    assert not _by_name(Gate(dev).run_design(guard, contract))[CHECK_ESCAPE].ok
+    admitted = ok.replace("Proof. exact I. Qed.", "Proof. Admitted.")
+    r = Gate(dev).run_design(admitted, contract)
+    assert not _by_name(r)[CHECK_NO_ADMIT].ok and "spec: Admitted (a result must be proved)" in _by_name(r)[CHECK_NO_ADMIT].detail
+    axiom = ok + "Axiom cheat : False.\n"
+    assert "new Axiom" in _by_name(Gate(dev).run_design(axiom, contract))[CHECK_NO_ADMIT].detail
+
+
+def test_run_design_allows_admitted_non_result_stubs(tmp_path, monkeypatch):
+    dev = _dev(tmp_path, "Set Default Proof Using \"Type\".\nDefinition value := 1.\nLemma spec : True.\nProof. exact I. Qed.\n")
+    contract = DesignContract(mutable=frozenset({"value"}), results=frozenset({"spec"}))
+    cand = dev.source + "Lemma helper : True.\nProof. Admitted.\nLemma spec2 : True.\nProof. exact helper. Qed.\n"
+    contract = DesignContract(mutable=frozenset({"value"}), results=frozenset({"spec"}), addable_heads=(*contract.addable_heads, "Lemma"))
+    _fake_compile(monkeypatch, stdout="spec\n     : True\nClosed under the global context\nspec2\n     : True\nAxioms:\nhelper : True\n")
+    r = Gate(dev).run_design(cand, contract)
+    assert r.ok and _by_name(r)[CHECK_STUBS].detail.startswith("helper")
+    _fake_compile(monkeypatch, stdout="spec\n     : True\nClosed under the global context\nspec2\n     : True\nAxioms:\nspec : True\n")
+    r = Gate(dev).run_design(cand, contract)
+    assert not r.ok and "spec2: spec" in _by_name(r)[CHECK_AXIOMS_DESIGN].detail
+
+
+# ------------------------------------------------------------------ with coqc
+
+@needs_rocq
+def test_honest_proof_passes_on_the_canary(canary_dir):
+    dev = Development(canary_dir / "Canary.v")
+    sibs = [NodeSpec("canary_swap", "Lemma canary_swap (A B : PROP) : A ∗ B -∗ B ∗ A."),
+            NodeSpec("canary_assoc", "Lemma canary_assoc (A B C : PROP) : A ∗ (B ∗ C) -∗ (A ∗ B) ∗ C.")]
+    body = 'iIntros "H". iDestruct (canary_swap with "H") as "[HQR HP]". iDestruct "HQR" as "[HQ HR]". iFrame.'
+    r = Gate(dev).run("canary_main", sibs, target_body=body, stub_prefix=True)
+    assert r.ok, r.render()
+    assert r.assumptions == {"canary_main": ["canary_swap"]}
+    assert _by_name(r)[CHECK_STUBS].detail == "canary_swap (expected until they are discharged)"
+    assert [c.name for c in r.checks] == [CHECK_NO_ADMIT, CHECK_ESCAPE, CHECK_AMBIENT, CHECK_PINNING, CHECK_PROOF_USING,
+                                          CHECK_STRUCTURE, CHECK_COMPILES, CHECK_AXIOMS, CHECK_STUBS]
+    child = [NodeSpec("canary_swap", sibs[0].statement, body='iIntros "[HA HB]". iFrame.'), sibs[1]]
+    r2 = Gate(dev).run("canary_main", child, target="canary_swap", stub_prefix=True)
+    assert r2.ok and r2.assumptions == {"canary_swap": []}
+
+
+@needs_rocq
+def test_module_qualified_target_and_stub(tmp_path):
+    dev = _dev(tmp_path, MODULE)
+    stub = NodeSpec("stub_in_module", "Lemma stub_in_module (n m : nat) : n = n.")
+    r = Gate(dev).run("target", [stub], target_body="apply (stub_in_module n n).")
+    assert r.ok, r.render()
+    assert r.assumptions == {"target": ["M.stub_in_module"]}
+    assert _by_name(r)[CHECK_STUBS].detail.startswith("M.stub_in_module")
+
+
+@needs_rocq
+def test_wrapped_binder_stub_names_are_read_correctly(tmp_path):
+    dev = _dev(tmp_path)
+    r = Gate(dev).run("target", [NodeSpec("stub_wrapped", WRAPPED_STUB)], target_body="intros H. pose proof stub_wrapped. exact H.")
+    assert r.ok, r.render()
+    assert r.assumptions == {"target": ["stub_wrapped"]}
+
+
+@needs_rocq
+def test_classic_is_whitelisted_by_suffix(tmp_path):
+    dev = _dev(tmp_path, CLASSIC)
+    r = Gate(dev).run("target", [], target_body="apply classic.")
+    assert r.ok, r.render()
+    assert r.assumptions == {"target": ["classic"]} and CHECK_STUBS not in _by_name(r)
+    strict = Gate(dev, axiom_whitelist=())
+    r = strict.run("target", [], target_body="apply classic.")
+    assert not r.ok and _by_name(r)[CHECK_AXIOMS].detail == "target: classic"
+
+
+@needs_rocq
+def test_concurrent_gates_do_not_cross_contaminate(tmp_path):
+    dev = _dev(tmp_path)
+    gate = Gate(dev)
+    results: dict[str, GateResult] = {}
+
+    def run(name: str) -> None:
+        stub = NodeSpec(name, f"Lemma {name} : True.")
+        results[name] = gate.run("target", [stub], target_body=f"intros H. pose proof {name}. exact H.")
+
+    threads = [threading.Thread(target=run, args=(n,)) for n in ("stub_a", "stub_b", "stub_c", "stub_d")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for name, r in results.items():
+        assert r.ok, r.render()
+        assert r.assumptions == {"target": [name]}
+
+
+@needs_rocq
+def test_compile_timeout_marks_infrastructure(tmp_path):
+    r = Gate(_dev(tmp_path), timeout=0.001).run("target", [], target_body="intros H. exact H.")
+    assert r.infrastructure and not r.ok and "timed out" in _by_name(r)[CHECK_COMPILES].detail
+
+
+@needs_rocq
+def test_unused_premise_report_by_removal(tmp_path):
+    src = 'Set Default Proof Using "Type".\nLemma over (n : nat) (Hn : n > 0) (m : nat) : m = m.\nProof. reflexivity. Qed.\n'
+    dev = _dev(tmp_path, src)
+    r = Gate(dev).run("over", [], target_body="reflexivity.", unused_premise_report=True)
+    assert r.ok and r.unused_premises == ["Hn"]
+    assert _by_name(r)[CHECK_UNUSED].detail == "the proof does not need: Hn" and _by_name(r)[CHECK_UNUSED].advisory
+
+
+@needs_rocq
+def test_fast_and_full_paths_agree(tmp_path):
+    src = PLAIN + "\nLemma later (Q : Prop) : Q -> Q.\nProof. intros q. exact q. Qed.\n"
+    dev = _dev(tmp_path, src)
+    for body, expected in (("intros H. exact H.", True), ("intros H. exact (H : False).", False)):
+        fast = Gate(dev).run("target", [], target_body=body, stub_prefix=True)
+        full = Gate(dev).run("target", [], target_body=body, truncate=False)
+        assert fast.ok is expected and full.ok is expected

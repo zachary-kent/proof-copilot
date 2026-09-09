@@ -1,8 +1,4 @@
-"""`pcp report` -- a static HTML snapshot (PLAN.md 10).
-
-The dashboard is optional; the summary is not.  This is the summary in a form you
-can attach to something: one self-contained file, no server, no JavaScript.
-"""
+"""``pcp report`` -- a static HTML snapshot (PLAN.md 10): one file, no server, no JS."""
 
 from __future__ import annotations
 
@@ -12,12 +8,11 @@ from pathlib import Path
 
 from pcp.dash.serve import burndown, snapshot
 from pcp.orch.graph import Graph
+from pcp.util.io import atomic_write_text
 
 
 def write_report(graph: Graph, out: Path) -> Path:
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_report(graph), encoding="utf-8")
-    return out
+    return atomic_write_text(out, render_report(graph))
 
 
 def render_report(graph: Graph) -> str:
@@ -25,9 +20,7 @@ def render_report(graph: Graph) -> str:
     b = burndown(graph)
     rows = []
     for n in snap["nodes"]:
-        evidence = (
-            f'<div class="ev">{html.escape(n["evidence"])}</div>' if n["evidence"] else ""
-        )
+        evidence = f'<div class="ev">{html.escape(n["evidence"])}</div>' if n["evidence"] else ""
         rows.append(
             f'<tr><td class="n">{html.escape(n["name"])}</td>'
             f'<td class="{html.escape(n["proof_status"])}">{html.escape(n["proof_status"])}</td>'

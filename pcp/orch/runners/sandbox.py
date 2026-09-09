@@ -1,53 +1,79 @@
-"""Worker isolation, for benchmarks that must not be looked up.
+"""Worker isolation, for benchmarks that must not be looked up (PLAN.md 6, 13).
 
-PLAN.md 13 wants held-out lemmas from public developments (`iris-examples`,
-`actris`, `reloc`).  Those solutions are on the internet, and — less obviously — they
-are on *this machine*: an agent session's own transcript is a file under `$HOME`, and
-if the operator ever pasted the reference proof into a session, a worker with `Bash`
-can grep it out.  A solve rate measured without closing those doors measures nothing.
+Held-out lemmas from public developments have their solutions on the internet, and --
+less obviously -- on *this machine*: an agent session's own transcript is a file under
+``$HOME``, and if the operator ever pasted the reference proof into a session, a worker
+with ``Bash`` can grep it out.  So this wraps a runner's command in ``bwrap`` with an
+**allowlist**, not a blocklist:
 
-So this wraps a runner's command in `bwrap` with an **allowlist**, not a blocklist:
+* ``$HOME`` replaced by a tmpfs, with only the provider's credential files bound back;
+* the repo read-only with the answer-key subtrees masked;
+* exactly one writable directory: the attempt's own workdir;
+* an explicit environment allowlist (``SANDBOX_PASSTHROUGH`` + ``HOME`` +
+  ``PCP_SANDBOX``): the legacy sandbox inherited the whole orchestrator environment,
+  API keys included (PLAN.md 11, "nothing secret may ever enter them").  Enforced
+  twice: :meth:`Sandbox.environment` is what the ``bwrap`` process itself is started
+  with (so nothing else exists to inherit, on any bubblewrap), and ``--clearenv`` +
+  ``--setenv`` are emitted as well where the binary supports them (bubblewrap >= 0.5);
+* ``--unshare-pid`` so the worker's whole tree dies with it -- ``coqc``, ``pcp mcp``,
+  petanque -- instead of surviving the deadline kill.
 
-* no network at all (`--unshare-net`);
-* `$HOME` replaced by a tmpfs, with only the provider's credential files bound back,
-  so session transcripts, shell history and other checkouts are simply not there;
-* the repo read-only, with the answer-key directory masked;
-* exactly one writable directory: the node's own workdir.
+:meth:`Sandbox.wrap` is a pure function of its arguments: it never mutates the wrapped
+runner's argv (a shared argv swapped in and restored raced across the frontier and ran
+one node in another node's sandbox), and the same inputs give the same command line.
+Its only side effects are idempotent host-side staging: the content-addressed hosts
+file and the credential stage, both per uid and written atomically.
 
 What this does **not** do, and cannot: prevent a model from having memorised a public
-proof. Anonymised identifiers make recall harder, not impossible. Treat results on a
-public corpus as an upper bound and compare against a private one.
+proof.  Treat results on a public corpus as an upper bound.
 """
 
 from __future__ import annotations
 
+import copy
 import os
 import shutil
+import tempfile
 import threading
-import time
-from dataclasses import dataclass, field, replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+from pcp.config.env import SANDBOX, SANDBOX_PASSTHROUGH, bwrap_binary, with_runner_defaults
+from pcp.errors import ToolchainError
+from pcp.orch.protocol import NodePayload, NodeResult
+from pcp.util.hashing import content_hash, short_hash
+from pcp.util.io import atomic_write_text, read_text
+from pcp.util.paths import home as user_home
+from pcp.util.paths import tmpdir
+from pcp.util.proc import run
+
+__all__ = [
+    "CREDENTIAL_FILES",
+    "SOLUTION_HOSTS",
+    "Sandbox",
+    "SandboxedRunner",
+    "available",
+    "bwrap_binary",
+    "stage_credentials",
+    "sync_credentials",
+]
 
 #: Files each provider needs to stay logged in.  Everything else under its config
 #: directory -- transcripts, history, session state -- is deliberately absent.
 CREDENTIAL_FILES: dict[str, tuple[str, ...]] = {
-    "claude": (".claude/.credentials.json", ".claude/config.json", ".claude/settings.json", ".claude.json"),
+    "anthropic": (".claude/.credentials.json", ".claude/config.json", ".claude/settings.json", ".claude.json"),
     "codex": (".codex/auth.json", ".codex/config.toml"),
 }
+PROVIDER_BINARIES: dict[str, str] = {"anthropic": "claude", "codex": "codex"}
+_PROVIDER_ALIASES = {"claude": "anthropic", "claude-code": "anthropic"}
 
-#: Hosts that carry *mechanisations* -- code forges and code search.  Blackholed in
-#: the sandbox's `/etc/hosts`.
-#:
-#: This is affordable only because the worker does not need them: the Iris and stdpp
-#: sources it is compiling against are bound into the sandbox, and `pcp docs` builds
-#: a grep-able index of every declaration in them.  That is better documentation than
-#: a web search, and it is the same version as the goal.
-#:
-#: Documentation *sites* stay reachable -- they carry papers and manuals, not proof
-#: scripts (see :data:`ALLOWED_DOC_HOSTS`).
-#:
-#: Defence in depth only: this stops an agent that reaches for a URL, not one that
-#: reaches for an IP. `network=False` is the only airtight mode.
+#: Hosts that carry *mechanisations* -- code forges and code search -- blackholed in
+#: the sandbox's ``/etc/hosts``.  Affordable because the worker does not need them:
+#: the Iris and stdpp sources are bound in and ``pcp docs`` indexes every declaration.
+#: Documentation sites stay reachable.  Defence in depth only: it stops an agent that
+#: reaches for a URL, not one that reaches for an IP; ``network=False`` is airtight.
 SOLUTION_HOSTS: tuple[str, ...] = (
     "github.com", "www.github.com", "raw.githubusercontent.com", "gist.github.com",
     "codeload.github.com", "objects.githubusercontent.com", "api.github.com",
@@ -56,375 +82,373 @@ SOLUTION_HOSTS: tuple[str, ...] = (
     "google.com", "www.google.com", "bing.com", "duckduckgo.com", "search.marginalia.nu",
 )
 
-#: Left reachable on purpose: manuals, tutorials and papers.  Blocking these would
-#: make the benchmark measure "can it work without documentation", which is not the
-#: question.  Listed for the record -- nothing is done to them.
-ALLOWED_DOC_HOSTS: tuple[str, ...] = (
-    "iris-project.org", "plv.mpi-sws.org", "rocq-prover.org", "coq.inria.fr",
-    "coq.github.io", "stackoverflow.com", "arxiv.org",
-)
+SYSTEM_PATHS: tuple[str, ...] = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt")
 
-
-def bwrap_binary() -> str | None:
-    return os.environ.get("PCP_BWRAP") or shutil.which("bwrap")
+#: How often the credential stage is re-synced.  A worker can outlive several token
+#: refreshes (a design round is budgeted at 5400 s) and reads the stage live.
+CRED_REFRESH_SECONDS = 60.0
 
 
 def available() -> bool:
     return bwrap_binary() is not None
 
 
-@dataclass
+_CLEARENV_SUPPORT: dict[str, bool] = {}
+_CLEARENV_LOCK = threading.Lock()
+
+
+def supports_clearenv(bwrap: str) -> bool:
+    """Whether this bubblewrap knows ``--clearenv`` (0.5+); probed once per binary."""
+    with _CLEARENV_LOCK:
+        if bwrap in _CLEARENV_SUPPORT:
+            return _CLEARENV_SUPPORT[bwrap]
+    probe = run([bwrap, "--help"], timeout=10)
+    supported = not probe.spawn_error and "--clearenv" in probe.output
+    with _CLEARENV_LOCK:
+        _CLEARENV_SUPPORT[bwrap] = supported
+    return supported
+
+
+def provider_key(provider: str) -> str:
+    return _PROVIDER_ALIASES.get(provider, provider)
+
+
+def stage_root() -> Path:
+    """Per-uid, 0700: two users on one box never share a stage, and the root is not
+    created with the umask."""
+    root = tmpdir() / f"pcp-sandbox-{os.getuid()}"
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    return root
+
+
+@dataclass(frozen=True)
 class Sandbox:
-    """An allowlist sandbox for one worker attempt."""
+    """An allowlist sandbox policy, applied per attempt by :meth:`wrap`."""
 
-    workdir: Path
-    #: Read-only paths the worker legitimately needs (toolchain, the repo, python).
-    ro_paths: list[Path] = field(default_factory=list)
-    #: Paths to blank out *after* the read-only binds -- the answer key, the graph.
-    masked: list[Path] = field(default_factory=list)
+    #: Read-only paths the worker legitimately needs (the repo, the toolchain).
+    ro_paths: tuple[Path, ...] = ()
+    #: Paths blanked out *after* the read-only binds -- the answer key, the graph.
+    masked: tuple[Path, ...] = ()
     #: Provider credential files, relative to the real home.
-    credentials: list[str] = field(default_factory=list)
-    #: Binaries the worker must be able to execute.  Their real paths' directories
-    #: are bound read-only -- `claude` lives under `$HOME`, which is otherwise gone.
-    binaries: list[str] = field(default_factory=list)
-    network: bool = False
-    #: Hosts blackholed in the sandbox's `/etc/hosts` when the network *is* up.
+    credentials: tuple[str, ...] = ()
+    #: Binaries the worker must execute; their directories are bound read-only.
+    binaries: tuple[str, ...] = ()
+    network: bool = True
     deny_hosts: tuple[str, ...] = ()
-    #: Documentation bound back *after* masking -- the local Iris index.
-    docs_paths: list[Path] = field(default_factory=list)
-    #: Paths bound back read-only after masking.  Used to carve the one corpus a run
-    #: is allowed to see out of a `masked` corpus tree.
-    unmasked: list[Path] = field(default_factory=list)
-    home: Path = field(default_factory=lambda: Path.home())
-    env_passthrough: tuple[str, ...] = (
-        "PATH", "LANG", "LC_ALL", "TERM", "ROCQPATH", "COQPATH", "OCAMLPATH",
-        "PCP_COQC", "PCP_PET", "PCP_PET_SERVER",
-    )
+    #: Bound back after masking: the local Iris index.
+    docs_paths: tuple[Path, ...] = ()
+    #: Bound back after masking: the corpus under test, curated libraries.
+    unmasked: tuple[Path, ...] = ()
+    home: Path = field(default_factory=user_home)
+    env_passthrough: tuple[str, ...] = SANDBOX_PASSTHROUGH
+    #: Where hosts files and credential stages live; default ``$TMPDIR/pcp-sandbox-<uid>``.
+    root: Path | None = None
+    #: Off in tests: the refresher is a daemon thread that outlives the sandbox object.
+    refresh_credentials: bool = True
+    #: Emit ``--clearenv``: ``None`` probes the binary, ``True``/``False`` force it.
+    clearenv: bool | None = None
 
-    def wrap(self, argv: list[str]) -> list[str]:
+    def environment(self, env: Mapping[str, str] | None = None) -> dict[str, str]:
+        """The allowlisted environment the sandboxed command runs with -- and the
+        environment the ``bwrap`` process itself must be started with."""
+        environ = with_runner_defaults(env)
+        out = {"HOME": str(self.home.resolve()), SANDBOX: "1"}
+        for name in self.env_passthrough:
+            value = environ.get(name)
+            if value:
+                out[name] = value
+        return out
+
+    @classmethod
+    def for_benchmark(
+        cls,
+        repo: Path,
+        *,
+        reference: Path | None = None,
+        corpus_dir: Path | None = None,
+        library: Sequence[Path] = (),
+        network: bool = True,
+        provider: str = "anthropic",
+        toolchain: Path | None = None,
+        docs: Path | None = None,
+        binaries: Sequence[str] | None = None,
+        home: Path | None = None,
+        root: Path | None = None,
+    ) -> Sandbox:
+        """The configuration a held-out-lemma benchmark uses (contract 3.4).
+
+        The repo is bound read-only in full, and the repo is not innocent: ``eval/``
+        holds every *other* rung (for a design rung, the same development with the
+        design given), ``docs/`` quotes the benchmarks, ``tests/`` fixtures are real
+        examples, ``.git`` holds pre-scrub history and ``.pcp`` holds the answer key
+        and every earlier run.  All are masked; the corpus under test, the docs index
+        and any curated library are carved back out afterwards.
+        """
+        repo = Path(repo).resolve()
+        real_home = Path(home) if home is not None else user_home()
+        ro = [repo, Path(toolchain) if toolchain is not None else real_home / ".opam"]
+        masked = [repo / ".pcp", *(repo / sub for sub in (".git", "eval", "docs", "tests"))]
+        if reference is not None:
+            masked.append(Path(reference).resolve())
+        unmasked = [Path(corpus_dir).resolve()] if corpus_dir is not None else []
+        unmasked += [Path(p).resolve() for p in library]
+        key = provider_key(provider)
+        return cls(
+            ro_paths=tuple(ro),
+            masked=tuple(masked),
+            credentials=CREDENTIAL_FILES.get(key, ()),
+            binaries=tuple(binaries) if binaries is not None else (PROVIDER_BINARIES.get(key, key), "python3", "pcp"),
+            network=network,
+            deny_hosts=SOLUTION_HOSTS,
+            docs_paths=(Path(docs) if docs is not None else repo / ".pcp" / "docs",),
+            unmasked=tuple(unmasked),
+            home=real_home,
+            root=root,
+            refresh_credentials=True,
+        )
+
+    # ---------------------------------------------------------------- wrap
+
+    def wrap(
+        self,
+        argv: Sequence[str],
+        *,
+        workdir: Path,
+        node_file_dir: Path | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> list[str]:
+        """The bwrap command line for one attempt (mount order: contract 3.4).
+
+        ``node_file_dir`` is the directory of the development the worker proves
+        against: after a design is adopted it lives under the masked work root, and
+        ``pcp check`` opens it eagerly, so only that directory is bound back.
+        """
         bwrap = bwrap_binary()
         if bwrap is None:
-            raise RuntimeError("bwrap is not installed; sandboxed runs need bubblewrap")
+            raise ToolchainError("bwrap is not installed; sandboxed runs need bubblewrap")
         home = self.home.resolve()
-        cmd: list[str] = [bwrap, "--die-with-parent", "--new-session"]
+        root = self.root if self.root is not None else stage_root()
+        cmd: list[str] = [bwrap, "--die-with-parent", "--new-session", "--unshare-pid"]
         if not self.network:
             cmd.append("--unshare-net")
-
-        # System paths: read-only, and only the ones a build needs.
-        for path in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt"):
-            if Path(path).exists():
-                cmd += ["--ro-bind", path, path]
-        hosts_file = self._hosts_file()
-        if hosts_file is not None:
-            cmd += ["--ro-bind", str(hosts_file), "/etc/hosts"]
+        for system in SYSTEM_PATHS:
+            if Path(system).exists():
+                cmd += ["--ro-bind", system, system]
+        if self.network and self.deny_hosts:
+            cmd += ["--ro-bind", str(hosts_file(self.deny_hosts, root)), "/etc/hosts"]
         cmd += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run"]
         if self.network:
-            # `/etc/resolv.conf` is usually a symlink into `/run`, which the tmpfs
-            # above has just replaced -- so DNS dies silently and every fetch looks
-            # like a network failure rather than a configuration one.  Bind the real
-            # file back over the link.
+            # ``/etc/resolv.conf`` is usually a symlink into ``/run``, which the tmpfs
+            # just replaced; bind the *resolved* file back or DNS dies silently.
             resolv = Path("/etc/resolv.conf")
             if resolv.exists():
                 real = resolv.resolve()
-                # Bind to the *resolved* path: `/etc` is read-only here, and when
-                # resolv.conf is a symlink into `/run` the link target must be the
-                # thing that exists, not the link itself.
-                target = str(real) if real != resolv else "/etc/resolv.conf"
-                cmd += ["--ro-bind", str(real), target]
-
-        # The home directory is replaced wholesale, then rebuilt from an allowlist.
-        # This is the step that removes session transcripts and stray checkouts.
+                cmd += ["--ro-bind", str(real), str(real) if real != resolv else "/etc/resolv.conf"]
         cmd += ["--tmpfs", str(home)]
         for path in self.ro_paths:
             resolved = Path(path).resolve()
             if resolved.exists():
                 cmd += ["--ro-bind", str(resolved), str(resolved)]
-        # Masking comes after the binds, so a read-only repo can still have its
-        # answer-key directory blanked out.
+        # Masks come after the binds so a read-only repo can have subtrees blanked.  A
+        # mask that does not exist is skipped: nothing there can leak, and bwrap
+        # cannot create a mount point inside a read-only bind (legacy bug 18).
         for path in self.masked:
-            cmd += ["--tmpfs", str(Path(path).resolve())]
-        # Credentials are staged into a directory and the *directory* is bound, never
-        # the individual files.  `--ro-bind <file>` pins an inode, and an OAuth refresh
-        # replaces the credentials file by atomic rename -- so every worker spawned
-        # before a refresh kept reading the old inode and got
-        # `401 OAuth access token has been revoked` the moment the host rotated.  That
-        # killed the 2026-09-01 design ladder 20 minutes in, and had eaten rungs
-        # before.  Binding `~/.claude` itself is not the fix: it holds session
-        # transcripts, which is exactly what this sandbox exists to remove.  So only
-        # the allowlisted files are copied into the stage, and a rename inside the
-        # bound directory *is* visible to a running worker.
-        for host_dir, stage_dir in _stage_credentials(self.credentials, home):
+            resolved = Path(path).resolve()
+            if resolved.exists():
+                cmd += ["--tmpfs", str(resolved)]
+        # Credentials: a *directory* stage is bound, never the files.  ``--ro-bind
+        # <file>`` pins an inode, and an OAuth refresh replaces the file by rename --
+        # every worker spawned before the rotation kept the revoked token.
+        for host_dir, stage_dir in stage_credentials(self.credentials, home, root=root, refresh=self.refresh_credentials):
             cmd += ["--ro-bind", str(stage_dir), str(host_dir)]
         for rel in self.credentials:
             src = home / rel
             if src.exists() and src.parent == home:
-                # A file sitting directly in `$HOME` has no directory to stage into --
-                # `$HOME` is the tmpfs this sandbox is built on.  These are config, not
-                # the rotating OAuth token, so a pinned inode is harmless here.
+                # Directly in ``$HOME`` (the tmpfs): config, not the rotating token.
                 cmd += ["--ro-bind", str(src), str(src)]
         for binary in self.binaries:
-            for path in _binary_paths(binary):
+            for path in _binary_dirs(binary):
                 cmd += ["--ro-bind", str(path), str(path)]
-
-        for path in [*self.docs_paths, *self.unmasked]:
+        extra = [*self.docs_paths, *self.unmasked]
+        if node_file_dir is not None:
+            extra.append(Path(node_file_dir))
+        for path in extra:
             resolved = Path(path).resolve()
             if resolved.exists():
                 cmd += ["--ro-bind", str(resolved), str(resolved)]
-
-        # Exactly one writable place.
-        work = self.workdir.resolve()
+        work = Path(workdir).resolve()
         cmd += ["--bind", str(work), str(work), "--chdir", str(work)]
-
-        cmd += ["--setenv", "HOME", str(home)]
-        cmd += ["--setenv", "PCP_SANDBOX", "1"]
-        for name in self.env_passthrough:
-            value = os.environ.get(name)
-            if value:
-                cmd += ["--setenv", name, value]
+        # The allowlist: ``--clearenv`` first (where known), then only what is named.
+        clearenv = self.clearenv if self.clearenv is not None else supports_clearenv(bwrap)
+        if clearenv:
+            cmd.append("--clearenv")
+        for name, value in self.environment(env).items():
+            cmd += ["--setenv", name, value]
         cmd.append("--")
-        cmd += argv
+        cmd += [str(a) for a in argv]
         return cmd
 
-    def _hosts_file(self) -> Path | None:
-        """A `/etc/hosts` that blackholes the solution hosts.
 
-        Only meaningful when the network is up; with ``network=False`` there is
-        nothing to resolve.  The file is content-addressed and reused across
-        concurrent sandboxes: a fresh temp file per attempt races with `/tmp`
-        cleanup and produces a `Can't find source path` failure that looks like a
-        worker error and is not.
-        """
-        if not self.network or not self.deny_hosts:
-            return None
-        return _hosts_file_for(self.deny_hosts)
-
-    @classmethod
-    def for_benchmark(
-        cls,
-        workdir: Path,
-        *,
-        repo: Path,
-        toolchain: Path | None = None,
-        reference: Path | None = None,
-        provider: str = "claude",
-        network: bool = True,
-        binaries: list[str] | None = None,
-        docs: Path | None = None,
-        corpus: Path | None = None,
-        library: list[Path] | None = None,
-    ) -> "Sandbox":
-        """The configuration a held-out-lemma benchmark should use.
-
-        ``network=True`` by default because a subscription-backed CLI worker has to
-        reach its provider to think at all.  The lookup control in that mode is the
-        *tool allowlist* (the worker is given no web tool and a Bash restricted to
-        the checker) plus the host blackhole; the masked home removes the local
-        copies.  ``network=False`` is airtight but only usable with a runner that
-        executes the model outside the sandbox.
-        """
-        repo = Path(repo).resolve()
-        ro = [repo]
-        if toolchain is None:
-            toolchain = Path.home() / ".opam"
-        ro.append(Path(toolchain))
-        masked = [repo / ".pcp"]
-        if reference is not None:
-            masked.append(Path(reference).resolve())
-        # The repo is bound read-only in full, and the repo is not innocent.  A
-        # worker needs exactly four things: the `pcp` package (to run `pcp check`),
-        # the toolchain, its own corpus, and the Iris index.  Everything else in the
-        # tree is a channel, and three of them were live:
-        #
-        # * `eval/corpus/` holds every *other* rung.  For a design rung that is the
-        #   answer -- the sibling rung is the same development with the design
-        #   **given**: the real invariant, the ghost state, the helper lemmas with
-        #   their proofs, and a DESIGN.md carrying the author's strategy in prose.
-        #   Anonymisation renames it; it does not withhold it.
-        # * `docs/` explains the benchmarks, which means it quotes them -- including
-        #   the reference shape of a predicate a rung asks a worker to invent.
-        # * `.git` can hold any earlier state of any of the above, pre-scrub.
-        #
-        # `tests/` goes for the same reason as `docs/`: fixtures are made of real
-        # examples.  The one rung under test is bound back afterwards.
-        unmasked: list[Path] = []
-        for extra in (repo / ".git", repo / "eval", repo / "docs", repo / "tests"):
-            if extra.exists():
-                masked.append(extra)
-        if corpus is not None:
-            unmasked.append(Path(corpus).resolve())
-        # A ladder rung may be given what *this system* produced on the rungs below
-        # it, and published reading -- the way a person carries their own last proof
-        # and a paper into the next problem.  Deliberately narrow: these are curated
-        # directories, bound after the masks, and they must never contain a corpus
-        # reference proof.  `eval/corpus` stays masked either way, so the only route
-        # in is the one the operator explicitly opened.
-        for extra in library or []:
-            unmasked.append(Path(extra).resolve())
-        # The docs index lives under `.pcp`, which was just masked; bind it back so
-        # the worker keeps its documentation but not the answer key.
-        docs = docs if docs is not None else repo / ".pcp" / "docs"
-        return cls(
-            workdir=workdir,
-            ro_paths=ro,
-            masked=masked,
-            credentials=list(CREDENTIAL_FILES.get(provider, ())),
-            binaries=binaries if binaries is not None else [provider, "python3", "pcp"],
-            network=network,
-            deny_hosts=SOLUTION_HOSTS,
-            docs_paths=[Path(docs)] if docs else [],
-            unmasked=unmasked,
-        )
+# ---------------------------------------------------------------- host-side staging
 
 
-_HOSTS_CACHE: dict[str, Path] = {}
+def hosts_file(deny: Sequence[str], root: Path) -> Path:
+    """A ``/etc/hosts`` that blackholes ``deny``, content-addressed and shared.
 
-
-def _hosts_file_for(deny: tuple[str, ...]) -> Path:
-    import hashlib
-    import tempfile
-
-    key = hashlib.blake2b("\n".join(deny).encode(), digest_size=8).hexdigest()
-    cached = _HOSTS_CACHE.get(key)
-    if cached is not None and cached.exists():
-        return cached
-    base = Path("/etc/hosts").read_text(encoding="utf-8") if Path("/etc/hosts").exists() else ""
-    lines = [base, "", "# pcp benchmark isolation: mechanisation hosts are blackholed"]
+    A fresh temp file per attempt raced with ``/tmp`` cleanup and produced bwrap's
+    "Can't find source path", which looked like a worker error.  Written atomically,
+    so two orchestrators starting together cannot bind a half-written file.
+    """
+    base = read_text("/etc/hosts") if Path("/etc/hosts").exists() else ""
+    lines = [base.rstrip("\n"), "", "# pcp benchmark isolation: mechanisation hosts are blackholed"]
     for host in deny:
         lines.append(f"127.0.0.1 {host}")
         lines.append(f"::1 {host}")
-    root = Path(tempfile.gettempdir()) / "pcp-sandbox"
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / f"hosts-{key}"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _HOSTS_CACHE[key] = path
+    content = "\n".join(lines) + "\n"
+    path = Path(root) / f"hosts-{content_hash(content, prefix='', size=8)}"
+    if not path.exists() or read_text(path) != content:
+        atomic_write_text(path, content)
     return path
 
 
-#: Host credential file -> its staged copy, for the background refresher.
-_CRED_STAGED: dict[Path, Path] = {}
-_CRED_LOCK = threading.Lock()
-_CRED_REFRESHER: threading.Thread | None = None
-#: How often the stage is re-synced from the host.  A worker can outlive several
-#: token refreshes -- a design round is budgeted at 5400 s -- and it reads the stage
-#: live, so the stage has to keep up on its own rather than only at spawn time.
-CRED_REFRESH_SECONDS = 60.0
+class _CredentialStage:
+    """Staged credential copies plus the refresher that keeps them current.
 
-
-def _copy_credential(src: Path, dst: Path) -> None:
-    """Refresh one staged file, atomically and with the source's permissions.
-
-    Written to a temporary name in the *same* directory and renamed, so a worker
-    reading the stage never sees a half-written token.
+    Compares *content*, not ``(mtime, size)``: a token file is a few hundred bytes and
+    a rotation landing in the same timestamp tick with the same length would be
+    missed -- the exact failure staging exists to prevent, made rarer.
     """
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_name(dst.name + ".pcp-new")
-    shutil.copyfile(src, tmp)
-    os.chmod(tmp, os.stat(src).st_mode & 0o777)
-    os.replace(tmp, dst)
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._staged: dict[Path, Path] = {}
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def stage(self, credentials: Sequence[str], home: Path, *, root: Path, refresh: bool) -> list[tuple[Path, Path]]:
+        by_parent: dict[Path, list[Path]] = {}
+        for rel in credentials:
+            src = home / rel
+            if src.exists() and src.parent != home:
+                by_parent.setdefault(src.parent, []).append(src)
+        if not by_parent:
+            return []
+        out: list[tuple[Path, Path]] = []
+        for host_dir, files in sorted(by_parent.items()):
+            stage = Path(root) / f"creds-{short_hash(str(host_dir))}"
+            stage.mkdir(parents=True, exist_ok=True)
+            os.chmod(stage, 0o700)
+            with self._lock:
+                for src in files:
+                    self._staged[src] = stage / src.name
+            out.append((host_dir, stage))
+        self.sync()
+        if refresh:
+            self.start()
+        return out
+
+    def sync(self) -> int:
+        with self._lock:
+            items = list(self._staged.items())
+        changed = 0
+        for src, dst in items:
+            try:
+                if not src.exists():
+                    continue
+                current = src.read_bytes()
+                if dst.exists() and dst.read_bytes() == current:
+                    continue
+                _copy_atomically(src, dst, current)
+                changed += 1
+            except OSError:
+                # A credential that cannot be staged must not take the run down; the
+                # worker fails its own auth check and is classified as such.
+                continue
+        return changed
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, name="pcp-credential-refresh", daemon=True)
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(CRED_REFRESH_SECONDS):
+            self.sync()
+
+
+_STAGE = _CredentialStage()
+
+
+def stage_credentials(credentials: Sequence[str], home: Path, *, root: Path | None = None, refresh: bool = True) -> list[tuple[Path, Path]]:
+    """Copy allowlisted credential files into per-directory stages; return the
+    ``(host_dir, stage_dir)`` pairs to bind.  Only named files are ever copied, so
+    the stage is an allowlist by construction."""
+    return _STAGE.stage(credentials, Path(home), root=root if root is not None else stage_root(), refresh=refresh)
 
 
 def sync_credentials() -> int:
-    """Re-copy any staged credential whose source has changed.  Returns how many.
-
-    Compares *content*, not `(mtime, size)`.  A token file is a few hundred bytes, so
-    hashing it is free, and the cheap comparison has a real hole: a rotation that
-    lands in the same filesystem timestamp tick and keeps the same length would be
-    skipped, leaving the worker on a revoked token -- the exact failure this staging
-    exists to prevent, made rarer and therefore harder to diagnose.
-    """
-    changed = 0
-    with _CRED_LOCK:
-        items = list(_CRED_STAGED.items())
-    for src, dst in items:
-        try:
-            if not src.exists():
-                continue
-            current = src.read_bytes()
-            if dst.exists() and dst.read_bytes() == current:
-                continue
-            _copy_credential(src, dst)
-            changed += 1
-        except OSError:
-            # A credential that cannot be staged must not take the run down; the
-            # worker will fail its own auth check and be classified as such.
-            continue
-    return changed
+    """Re-copy any staged credential whose source changed; returns how many."""
+    return _STAGE.sync()
 
 
-def _start_credential_refresher() -> None:
-    global _CRED_REFRESHER
-    if _CRED_REFRESHER is not None:
-        return
-
-    def _loop() -> None:
-        while True:
-            time.sleep(CRED_REFRESH_SECONDS)
-            sync_credentials()
-
-    _CRED_REFRESHER = threading.Thread(target=_loop, name="pcp-credential-refresh", daemon=True)
-    _CRED_REFRESHER.start()
-
-
-def _stage_credentials(credentials: list[str], home: Path) -> list[tuple[Path, Path]]:
-    """Copy allowlisted credential files into per-directory stages.
-
-    Returns ``(host_dir, stage_dir)`` pairs to bind.  Only files named in
-    ``credentials`` are ever copied, so the stage is an allowlist by construction --
-    the same guarantee the per-file binds gave, minus the pinned inode.
-    """
-    import hashlib
-    import tempfile
-
-    by_parent: dict[Path, list[Path]] = {}
-    for rel in credentials:
-        src = home / rel
-        if src.exists() and src.parent != home:
-            by_parent.setdefault(src.parent, []).append(src)
-    if not by_parent:
-        return []
-
-    root = Path(tempfile.gettempdir()) / "pcp-sandbox"
-    root.mkdir(parents=True, exist_ok=True)
-    out: list[tuple[Path, Path]] = []
-    for host_dir, files in sorted(by_parent.items()):
-        key = hashlib.blake2b(str(host_dir).encode(), digest_size=8).hexdigest()
-        stage = root / f"creds-{os.getuid()}-{key}"
-        stage.mkdir(parents=True, exist_ok=True)
-        os.chmod(stage, 0o700)
-        for src in files:
-            dst = stage / src.name
-            with _CRED_LOCK:
-                _CRED_STAGED[src] = dst
-        out.append((host_dir, stage))
-    sync_credentials()
-    _start_credential_refresher()
-    return out
+def _copy_atomically(src: Path, dst: Path, data: bytes) -> None:
+    """A unique temp name in the same directory, then rename: two processes syncing
+    the same stage cannot truncate each other's copy mid-write."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{dst.name}.", dir=str(dst.parent))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, os.stat(src).st_mode & 0o777)
+        os.replace(tmp, dst)
+    except BaseException:
+        with _suppress_oserror():
+            os.unlink(tmp)
+        raise
 
 
-def _binary_paths(name: str) -> list[Path]:
-    """The directories needed to execute ``name``: its symlink and its real target."""
+class _suppress_oserror:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        return exc_type is not None and issubclass(exc_type, OSError)
+
+
+def _binary_dirs(name: str) -> list[Path]:
+    """The directories needed to execute ``name``: its symlink's and its target's."""
     found = shutil.which(name)
     if not found:
         return []
-    out: list[Path] = []
     link = Path(found)
-    real = link.resolve()
-    for candidate in (link.parent, real.parent):
+    out: list[Path] = []
+    for candidate in (link.parent, link.resolve().parent):
         if candidate.exists() and candidate not in out:
             out.append(candidate)
     return out
 
 
+# ---------------------------------------------------------------- the runner wrapper
+
+
 @dataclass
 class SandboxedRunner:
-    """Wraps another runner so its subprocess runs inside a :class:`Sandbox`.
+    """Wraps a subprocess runner so each attempt's command runs inside ``sandbox``.
 
-    Delegates everything else -- the runner keeps its own prompt handling, deadline
-    ladder and answer parsing.  Only the argv changes.
+    Delegates everything else -- prompt handling, the deadline ladder, answer parsing.
+    The wrapped runner is *copied* per attempt and only the copy's ``argv`` and
+    ``env`` (the allowlist) change.
     """
 
-    inner: object
-    sandbox_factory: object  # Callable[[Path], Sandbox]
+    inner: Any
+    sandbox: Sandbox
     name: str = ""
 
     def __post_init__(self) -> None:
@@ -432,32 +456,20 @@ class SandboxedRunner:
             self.name = f"sandboxed:{getattr(self.inner, 'name', 'runner')}"
 
     def available(self) -> bool:
-        return available() and bool(self.inner.available())  # type: ignore[attr-defined]
+        return available() and bool(self.inner.available())
 
-    async def run_node(self, node):  # type: ignore[no-untyped-def]
-        from pcp.orch.runners.base import NodeResult
-
+    async def run_node(self, node: NodePayload) -> NodeResult:
         if not available():
-            return NodeResult(
-                status="error",
-                evidence="bwrap is not installed; refusing to run a benchmark worker unsandboxed",
-            )
-        # Never mutate the wrapped runner: the whole frontier dispatches at once, so
-        # a shared `argv` that is swapped in and restored races -- and the attempt
-        # that loses the race runs with another node's sandbox, or none at all.
-        import copy
-
-        inner = copy.copy(self.inner)
-        sandbox = self.sandbox_factory(node.workdir)  # type: ignore[operator]
-        # The development moves when a design is adopted: it is rewritten under the
-        # work root, which is masked so that one worker cannot read another's
-        # scratch.  The file the worker is proving *against* has to come back, or
-        # `pcp check` cannot open it -- `Development(meta["file"])` reads eagerly, so
-        # the worker's whole check loop dies on the first call with a path that only
-        # exists outside its sandbox.  Harmless to bind: it is the design under test,
-        # which the worker is given anyway.
-        source_dir = Path(node.file).resolve().parent if getattr(node, "file", "") else None
-        if source_dir is not None and source_dir not in sandbox.unmasked:
-            sandbox = replace(sandbox, unmasked=[*sandbox.unmasked, source_dir])
-        inner.argv = sandbox.wrap(list(self.inner.argv))  # type: ignore[attr-defined]
-        return await inner.run_node(node)  # type: ignore[attr-defined]
+            return NodeResult(status="error", evidence="bwrap is not installed; refusing to run a sandboxed worker unsandboxed")
+        argv = getattr(self.inner, "argv", None)
+        if argv is None:
+            return NodeResult(status="error", evidence=f"{self.inner.name} runs in-process and cannot be sandboxed")
+        node_file_dir = Path(node.file).resolve().parent if node.file else None
+        try:
+            wrapped = self.sandbox.wrap(list(argv), workdir=Path(node.workdir), node_file_dir=node_file_dir)
+        except (OSError, ToolchainError) as exc:
+            return NodeResult(status="error", evidence=f"bwrap: could not prepare the sandbox: {exc}")
+        clone = copy.copy(self.inner)
+        clone.argv = wrapped
+        clone.env = self.sandbox.environment()
+        return await clone.run_node(node)

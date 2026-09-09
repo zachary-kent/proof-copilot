@@ -12,7 +12,9 @@ Two layers, deliberately separable:
   `Admitted` lemma statements; cheap models prove them in parallel; a machine-checkable gate
   (`Qed` + `Print Assumptions`) decides completion.
 
-Design: [`docs/PLAN.md`](docs/PLAN.md) · What is built and what is not: [`docs/STATUS.md`](docs/STATUS.md)
+Design: [`docs/PLAN.md`](docs/PLAN.md) · How the code is organised and what it guarantees by
+construction: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · What is built:
+[`docs/STATUS.md`](docs/STATUS.md)
 
 ---
 
@@ -48,29 +50,48 @@ Proof. Admitted.
 
 What happens:
 
-1. **Statements freeze immediately**, by construction: worker patches are constrained to
-   proof-body spans, so the proved statement is byte-identical to the frozen one. Free sentinels
-   run (duplicate detection, partial-correctness flag).
+1. **Statements freeze immediately**, by construction: a worker returns a *proof body*, the
+   development is reassembled from the frozen source plus that body, and the body is checked to
+   be tactic sentences and nothing else before Rocq ever sees it. Free sentinels run (duplicate
+   detection, restated root, partial-correctness flag).
 2. **The whole frontier dispatches at once.** Every frozen statement with an open proof is
    dispatchable *now* — its dependencies are admissible as `Admitted` stubs — so parallelism is
    bounded by your rate window, never by graph depth.
 3. **Every return is gated deterministically**, with no model involved: assembly from the frozen
-   store, statement pinning, `Proof using` discipline, `Print Assumptions` ⊆ whitelist, no new
-   admits, no escape hatches, no global registrations, unused-premise probe.
-4. **Failures retry once with evidence**, then land back with you as `qed` / `stuck` /
-   `contested`. `pcp handoff <node>` drops a stuck node into your editor as a `.v` with the
-   statement, the best partial script, and the blame trace as comments.
+   store, structural recheck of the assembled file, `Proof using` discipline, compile,
+   `Print Assumptions` ⊆ whitelist (module-qualified, keyed by `Locate` markers so nothing a proof
+   prints can forge a block), no new admits, no escape hatches, no global registrations.
+4. **Failures retry once with evidence**, and the retry sees the previous attempt's partial proof.
+   Then they land back with you as `qed` / `stuck` / `contested`. `pcp handoff <node>` drops a
+   stuck node into your editor as a `.v` with the statement, the best partial script, and the
+   blame trace as comments.
 
 ```
-3 qed · 0 stuck · 0 contested   (23s, 3 dispatches)
-  qed       canary_main  (23s, 1 attempt(s))
-  qed       canary_swap  (22s, 1 attempt(s))
-  qed       canary_assoc  (21s, 1 attempt(s))
+3 qed · 0 stuck · 0 contested   (36s, 3 dispatches)
+  qed       canary_main  (33s, 1 attempt(s))
+  qed       canary_swap  (16s, 1 attempt(s))
+  qed       canary_assoc  (19s, 1 attempt(s))
 
 integrated: `canary_main` Qeds and Print Assumptions is clean.
 ```
 
-Watch it in a browser with `pcp serve`; check on it with `pcp status`.
+A run always resumes from its graph; a crash mid-dispatch picks up where it stopped, a proof that
+gated before the crash is salvaged rather than re-proved, and a partial left in a worker's file
+becomes the next attempt's starting point. A provider outage (logged out, session limit) pauses the
+run and it resumes by itself when the provider is back; `pcp prove --supervise` runs detached and
+restarts from the graph after a crash. One `pcp prove` per graph: the run holds a lock. Watch it in a browser with `pcp serve`; check on it with `pcp status`; read every
+attempt's packet, transcript, gate report and classification under `--record`.
+
+When a prover discovers mid-proof that the invariant lacks a fact, it asks for it instead of
+failing: a strengthening that compiles is applied mechanically, every proof is replayed, and only
+the close sites that broke re-open with the change named in their packet. Contests are adjudicated
+by a cheap approver before anything is redesigned, and so is any node that fails twice
+(`--review-after`): the approver either corrects the statement in place or tells the prover what
+to do differently, in seconds rather than another attempt's clock.
+
+Without a plan, a read-only **decomposer** (a model granted `Read`/`Glob`/`Grep` and nothing else)
+states the obligations and, on a design rung, the invariants; its proposal is compiled, checked
+against the corpus's design contract, and revised in bounded rounds from the provers' evidence.
 
 ## The state layer
 
@@ -96,6 +117,10 @@ why is "HP" not available at step 5?
 …and when it cannot tell, it says `unknown` rather than guessing. A confidently wrong provenance
 chain is worse than none.
 
+Sessions are pinned to the petanque process that created their states, every call has a
+wall clock, and a process that dies mid-session is reported as a *lost session* — never as
+"your tactic failed".
+
 ## Two claims this is built on
 
 **The lemma statement is the interface contract, and `Admitted` is a type-checked stub.** Because
@@ -112,40 +137,50 @@ ledger rather than a better prompt.
 ## Layout
 
 ```
-pcp/core/     pcp-state: session pool, trace, IPM model + parser + reflection, ledger, render, search
-pcp/orch/     pcp-orch:  SQLite graph, assembly, gate, sentinels, scheduler, runners, amendments
-pcp/mcp/      the tool surface (10 tools, hard-capped) + structured failure diagnosis
-pcp/cli/      the `pcp` command
+pcp/util/     stdlib-only helpers: subprocesses that die with their tree, atomic files, locks
+pcp/config/   environment, feature flags, .pcp/config.toml, provider bindings
+pcp/rocq/     Rocq text and coqc: the one lexer, declarations, body validation, assembly,
+              Print Assumptions -- no petanque
+pcp/state/    pcp-state: petanque process/pool/session, IPM model + parser + reflection,
+              skeletons, patterns, ledger, render, search, diagnosis
+pcp/mcp/      the tool surface (10 tools, hard-capped)
+pcp/orch/     pcp-orch: SQLite graph, gate, packets, runners, scheduler, the prove pipeline,
+              decomposer role, records, failure taxonomy
 pcp/dash/     `pcp serve` (SSE over SQLite) and `pcp report`
+pcp/cli/      the `pcp` command, one module per subcommand
 coq/IDump.v   the Ltac2 reflected IPM dump
 skills/       prover · decomposer · invariants · logatom
-eval/         held-out-lemma harness, the ablation ladder, the corpora
+eval/         held-out-lemma harness, the ablation ladder, the design-rung ladder, the corpora
 ```
+
+The import rule between layers (`pcp.orch` never imports `pcp.state`; the daily loop runs where
+the only Rocq binary is `coqc`) is a test, `tests/test_layering.py`.
 
 ## Benchmarks
 
-Five rungs from a real concurrent-separation-logic development, in increasing order of
-held-out proof size — up to a single `cas_spec` of 712 lines / 1069 tactics. The design
-is given (implementation, invariants, ghost state, helper lemmas); only the tactic work
-is removed.
+Five proof rungs and three design rungs from a real concurrent-separation-logic development. On
+a design rung the invariants and ghost state are blank; designing them is the task.
 
 ```bash
 python eval/harness.py --corpus eval/corpus/bench/rwcas \
   --reference .pcp/reference/rwcas --sandbox --runner claude --record .pcp/records
 pcp failures .pcp/records/<run-id>            # what to fix, not just how many passed
+
+python eval/ladder.py --brief spec-only --no-carry --no-paper   # every design rung, given only the spec
 ```
 
-`--sandbox` runs each worker under bubblewrap with `$HOME` replaced by a tmpfs, the
-answer key masked, and the code forges blackholed — while leaving the Iris sources and
-a grep-able index of all 11 646 declarations bound in, so documentation is *better*
-than the network rather than absent. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md),
-including what these controls do **not** prove.
+`--sandbox` runs each worker under bubblewrap with `$HOME` replaced by a tmpfs, the environment
+cleared to an allowlist, the answer key masked, and the code forges blackholed — while leaving
+the Iris sources and a grep-able index of every declaration bound in. `--brief spec-only` stages
+the corpus without its design brief, so neither workers nor the decomposer can read a hint that
+is not in the specification. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 ## Development
 
 ```bash
-pytest                       # 433 tests; Rocq-dependent ones skip without a toolchain
-pytest -m "not slow" -q
+make test                    # the whole suite; Rocq/petanque-dependent tests skip without a toolchain
+make fast                    # everything that does not need Rocq
+make lint typecheck
 python eval/extract_goldens.py --limit-files 40   # refresh the real-Iris golden corpus
 ```
 

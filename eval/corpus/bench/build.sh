@@ -80,7 +80,10 @@ design_seqlock() {
   # against the pinned toolchain (heapG -> heapGS, and then a chain of renamed Iris
   # lemmas), while the reference provably does -- make_benchmark verified it when the
   # proof rung was built. The names stay opaque; DESIGN.md's glossary carries the
-  # roles, which is what a designer actually needs.
+  # roles, which is what a designer actually needs.  Primed lemmas (`wp_array_copy_to'`,
+  # `wp_array_copy_to_half'`) are named by their *own* pseudonyms (`x17`, `d24` --
+  # see rename_map in the proof rung's reference.json); the legacy builder never
+  # renamed a primed identifier and left them as `ac19'`/`a25'`.
   local ref="$repo/.pcp/reference/seqlock/Mf6dd3f_reference.v"
   "$py" "$repo/eval/make_benchmark.py" "$ref" \
     --holdout bd31_spec x34_spec fc32_spec \
@@ -89,8 +92,8 @@ design_seqlock() {
     --persistent efd30 \
     --mutable fbe7 \
     --drop d5 --drop x6 --drop x9_own --drop a11_own --drop a15 \
-    --drop ef12_update --drop ff13_alloc --drop c14_agree --drop "ac19'" \
-    --drop ff18_agree --drop ac19 --drop de20 --drop "a25'" --drop a25 \
+    --drop ef12_update --drop ff13_alloc --drop c14_agree --drop x17 \
+    --drop ff18_agree --drop ac19 --drop de20 --drop d24 --drop a25 \
     --drop d29 --drop e33_inv --drop cbf21 --drop af22 --drop x23 \
     --drop b26 --drop eefe27 --drop ec28 \
     --class-fields 'fbe7=x35 :: heapGS Σ' \
@@ -110,7 +113,8 @@ design_seqlock_wf() {
   # Drop list computed, not hand-written: keep the program, the class, the
   # namespaces, the three design predicates and the frozen specs; drop every other
   # named declaration. `da0`/`cb1` are the zify BinOp instances -- dropping them
-  # would leave their `Add Zify` lines dangling, so they stay.
+  # would leave their `Add Zify` lines dangling, so they stay.  `x29`/`d35` are the
+  # primed array lemmas' own pseudonyms (formerly left as `wp_array_copy_to'`/`a36'`).
   local ref="$repo/.pcp/reference/seqlock_wf/M480dd7_reference.v"
   "$py" "$repo/eval/make_benchmark.py" "$ref" \
     --holdout bd42_spec x51_spec fc50_spec \
@@ -121,8 +125,8 @@ design_seqlock_wf() {
     --drop d6 --drop x7 --drop c8 --drop b9 --drop x13_own --drop a15_own \
     --drop ef16_update --drop ff17_alloc --drop c18_agree --drop bad19 --drop ba20 \
     --drop f21_update --drop bfd22_agree --drop ac23 --drop d24_inv --drop ad25_inv \
-    --drop x26_inv --drop cd27 --drop "wp_array_copy_to'" --drop ff30_agree \
-    --drop c31 --drop de32 --drop cbf33 --drop af34 --drop "a36'" --drop a36 \
+    --drop x26_inv --drop cd27 --drop x29 --drop ff30_agree \
+    --drop c31 --drop de32 --drop cbf33 --drop af34 --drop d35 --drop a36 \
     --drop b37 --drop eefe38 --drop ec39 --drop d40 --drop da43 --drop c44 \
     --drop be45 --drop fc46 --drop x47 --drop fbe48 --drop x49 \
     --class-fields 'fbe10=x52 :: heapGS Σ' \

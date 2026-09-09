@@ -1,34 +1,42 @@
-"""Durable per-attempt records, for failure analysis (PLAN.md 13).
+"""Durable per-attempt records, for failure analysis (PLAN.md 13; contract §5.3).
 
-"Every real session writes to `.pcp/traces/`. That is your regression corpus, your
-debugging record, and -- later -- training data."
+Every attempt -- successful or not -- leaves behind the exact packet the worker saw,
+what it sent back, what the gate said, the *full* event stream (head and tail), and
+a classification of how it failed.  Plain files on purpose: they outlive this tool,
+they diff, and a human can read one without a viewer.
 
-A solve rate tells you whether the tooling helped.  It does not tell you *what to
-build next*, and that is the question a benchmark run is actually being asked.  So
-every attempt -- successful or not -- leaves behind the exact packet the worker saw,
-what it sent back, what the gate said, and a classification of how it failed.
-
-The records are plain files on purpose.  They outlive this tool, they diff, and a
-human can read one without a viewer.
+Record directories are keyed by the graph's global attempt id, which is unique by
+construction, so a design round or a decomposer re-ask can never overwrite an
+earlier record (six audit bugs).  Writing twice to the same directory is refused.
 """
 
 from __future__ import annotations
 
-import json
-import shutil
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-from pcp.orch.failures import classify
+from pcp.errors import UsageError
+from pcp.orch.failures import classify_record, friction_classes
+from pcp.orch.protocol import ANSWER_FILE, NODE_FILE, TASK_FILE
+from pcp.util.io import atomic_write_text, copy_if_exists, ensure_dir, json_dump, json_load, read_text
+from pcp.util.text import head_tail, one_line
 
 RECORD_FILE = "record.json"
+RUN_LOG = "run.log"
+TRANSCRIPT_HEAD = 20_000
+TRANSCRIPT_TAIL = 200_000
+TRANSCRIPT_TAIL_CLASSIFIED = 4000
+COMPILE_OUTPUT_KEPT = 8000
+#: Worker files bigger than this are not copied into the record.
+COPIED_FILE_LIMIT = 32 << 20
 
 
 @dataclass
 class AttemptRecord:
-    """Everything about one worker attempt that is worth keeping."""
+    """Everything about one attempt that is worth keeping (fields = contract §5.3 + ids)."""
 
     run_id: str
     node: str
@@ -49,97 +57,93 @@ class AttemptRecord:
     primary_failure: str = ""
     failure_classes: list[str] = field(default_factory=list)
     failure_evidence: str = ""
-    #: Tail of the worker's transcript.  Classified alongside the evidence, because
-    #: an infrastructure failure shows up here and nowhere else.
     transcript_tail: str = ""
     corpus: str = ""
-    #: The worker's own trace: turns, tool calls, tokens, friction.
     trace: dict[str, Any] = field(default_factory=dict)
-    #: Failure classes the worker hit *and recovered from* on its way to a solve.
     friction_classes: list[str] = field(default_factory=list)
-    started_at: float = field(default_factory=time.time)
+    #: When the attempt started; filled from ``finished - elapsed`` if unset at write.
+    started_at: float = 0.0
+    #: The graph's attempt id (record directory key) and the design round.
+    attempt_id: int = 0
+    round: int = 1
+    #: The runner process's exit code -- a first-class classifier input.
+    exit_code: int | None = None
 
-    def classify(self) -> "AttemptRecord":
-        # Errors a worker recovered from are classified whether or not it solved.
-        # A lemma proved after six turns of mask arithmetic is the strongest signal
-        # there is about what to build next, and scoring it only as "solved" throws
-        # that away.
-        self.friction_classes = sorted({
-            klass
-            for err in (self.trace or {}).get("errors", [])
-            for klass in classify(err).classes
-        })
+    def classify(self) -> AttemptRecord:
+        """Classify with exactly the inputs ``pcp failures`` will use again later."""
+        rec = self.to_json()
+        self.friction_classes = sorted({klass for klass, _ in friction_classes(rec)})
         if self.solved:
-            self.primary_failure = ""
-            self.failure_classes = []
+            self.primary_failure, self.failure_classes, self.failure_evidence = "", [], ""
             return self
-        c = classify(
-            self.evidence, self.gate_report, self.compile_output,
-            context=self.transcript_tail,
-            status=self.status,
-        )
+        c = classify_record(rec)
         self.primary_failure = c.primary
         self.failure_classes = c.classes
-        self.failure_evidence = c.findings[0].evidence if c.findings else ""
+        self.failure_evidence = c.evidence
         return self
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> AttemptRecord:
+        known = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in data.items() if k in known})
+
 
 class Recorder:
-    """Writes attempt records under one run directory."""
+    """Writes attempt records under one run directory ``<root>/<run_id>/``."""
 
-    def __init__(self, root: Path, run_id: str | None = None) -> None:
-        self.run_id = run_id or time.strftime("%Y%m%d-%H%M%S")
-        self.root = Path(root) / self.run_id
-        self.root.mkdir(parents=True, exist_ok=True)
+    def __init__(self, root: str | Path, run_id: str | None = None) -> None:
+        base = Path(root)
+        self.run_id = run_id or _unique_run_id(base, time.strftime("%Y%m%d-%H%M%S"))
+        self.root = ensure_dir(base / self.run_id)
 
-    def dir_for(self, lemma: str, attempt: int) -> Path:
-        path = self.root / f"{_safe(lemma)}.{attempt}"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+    def dir_for(self, lemma: str, attempt_id: int, suffix: str = "") -> Path:
+        """``<run>/<lemma>.<attempt_id>[.<suffix>]`` -- unique because attempt ids are."""
+        name = f"{_safe(lemma)}.{int(attempt_id)}" + (f".{_safe(suffix)}" if suffix else "")
+        return self.root / name
 
-    def write(
-        self,
-        record: AttemptRecord,
-        *,
-        workdir: Path | None = None,
-        transcript: str = "",
-    ) -> Path:
+    def write(self, record: AttemptRecord, *, workdir: str | Path | None = None, transcript: str = "", suffix: str = "") -> Path:
+        out = self.dir_for(record.lemma, record.attempt_id or record.attempt, suffix)
+        if (out / RECORD_FILE).exists():
+            raise UsageError(f"refusing to overwrite the record at {out}")
+        ensure_dir(out)
         if transcript and not record.transcript_tail:
-            record.transcript_tail = transcript[-4000:]
+            record.transcript_tail = transcript[-TRANSCRIPT_TAIL_CLASSIFIED:]
+        record.compile_output = record.compile_output[-COMPILE_OUTPUT_KEPT:]
+        if not record.started_at:
+            record.started_at = time.time() - record.elapsed_s
         record.classify()
         record.proof_lines = len(record.proof.strip().splitlines()) if record.proof else 0
-        out = self.dir_for(record.lemma, record.attempt)
-        (out / RECORD_FILE).write_text(json.dumps(record.to_json(), indent=2, default=str), encoding="utf-8")
+        json_dump(out / RECORD_FILE, record.to_json())
         if record.proof:
-            (out / "proof.v").write_text(record.proof, encoding="utf-8")
+            atomic_write_text(out / "proof.v", record.proof)
         if record.gate_report:
-            (out / "gate.txt").write_text(record.gate_report, encoding="utf-8")
+            atomic_write_text(out / "gate.txt", record.gate_report)
         if record.trace:
-            (out / "trace.json").write_text(
-                json.dumps(record.trace, indent=2, default=str), encoding="utf-8"
-            )
+            json_dump(out / "trace.json", record.trace)
         if transcript:
-            # Keep the head as well as the tail: the CLI reports MCP server status in
-            # its very first event, and a tail-only transcript hid a server that was
-            # failing to start on every run.
-            (out / "transcript.txt").write_text(_clip(transcript), encoding="utf-8")
+            atomic_write_text(out / "transcript.txt", head_tail(transcript, head=TRANSCRIPT_HEAD, tail=TRANSCRIPT_TAIL))
         if workdir is not None:
-            # The packet is the worker's whole world; keeping it is what makes a
-            # failure reproducible six weeks later.
-            for name in ("TASK.md", "pcp-node.json", "answer.json"):
-                src = Path(workdir) / name
-                if src.exists():
-                    shutil.copy2(src, out / name)
+            for name in (TASK_FILE, NODE_FILE, ANSWER_FILE):
+                copy_if_exists(Path(workdir) / name, out / name, max_bytes=COPIED_FILE_LIMIT)
         return out
 
+    def log(self, line: str) -> Path:
+        """Append one timestamped line to ``<run>/run.log``: the run's own narrative
+        (a pause, a resume, a restart) next to the attempts it explains.  Plain
+        ``open(..., "a")``: one writer per run, and a line lost to a crash is a line
+        about the crash."""
+        path = self.root / RUN_LOG
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {one_line(line, 400)}\n")
+        return path
+
     def summary(self) -> dict[str, Any]:
-        records = list(load_records(self.root))
         from pcp.orch.failures import summarize
 
-        report = summarize(records)
+        report = summarize(load_records(self.root))
         return {
             "run_id": self.run_id,
             "root": str(self.root),
@@ -149,30 +153,49 @@ class Recorder:
         }
 
 
-def load_records(root: Path) -> Iterator[dict[str, Any]]:
+def load_records(root: str | Path) -> Iterator[dict[str, Any]]:
     """Every attempt record under ``root``, in a stable order.
 
     Records written before ``transcript_tail`` existed are backfilled from the
-    ``transcript.txt`` next to them, so an old run reclassifies under new rules
-    instead of being stuck with the verdict it got on the day.
+    ``transcript.txt`` next to them.  An unreadable ``record.json`` (a run killed
+    mid-write, before atomic writes) is yielded as a failed, ``unreadable`` record
+    rather than silently dropped from the totals.
     """
     for path in sorted(Path(root).rglob(RECORD_FILE)):
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+            record = json_load(path)
+        except (ValueError, OSError, RecursionError) as exc:
+            yield {
+                "lemma": path.parent.name, "status": "error", "solved": False, "unreadable": True,
+                "evidence": f"unreadable {RECORD_FILE}: {type(exc).__name__}: {exc}",
+            }
+            continue
+        if not isinstance(record, dict):
             continue
         if not record.get("transcript_tail"):
             transcript = path.parent / "transcript.txt"
             if transcript.exists():
-                record["transcript_tail"] = transcript.read_text(encoding="utf-8")[-4000:]
+                record["transcript_tail"] = read_text(transcript)[-TRANSCRIPT_TAIL_CLASSIFIED:]
         yield record
-
-
-def _clip(text: str, head: int = 20_000, tail: int = 200_000) -> str:
-    if len(text) <= head + tail:
-        return text
-    return text[:head] + f"\n\n… [{len(text) - head - tail} chars elided] …\n\n" + text[-tail:]
 
 
 def _safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "_-." else "_" for c in name)[:80]
+
+
+def _unique_run_id(base: Path, stamp: str) -> str:
+    """``stamp``, or ``stamp-N`` when that directory already exists.
+
+    The run id has one-second resolution; two runs started in the same second shared
+    a record directory and the second refused to write (review finding).  ``mkdir``
+    is the claim, so two processes cannot both win the same name.
+    """
+    base.mkdir(parents=True, exist_ok=True)
+    for n in range(1000):
+        candidate = stamp if n == 0 else f"{stamp}-{n}"
+        try:
+            (base / candidate).mkdir()
+        except FileExistsError:
+            continue
+        return candidate
+    raise UsageError(f"{base}: could not find a free run directory for {stamp}")

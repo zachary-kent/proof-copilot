@@ -1,25 +1,19 @@
-"""`pcp sketch` -- compile a CSL proof sketch into frozen obligations (PLAN.md 9.3).
+"""``pcp sketch`` -- compile a CSL proof sketch into frozen obligations (PLAN.md 9.3).
 
 Design decisions should be made where cheating pressure is lowest, and that is the
-sketch: there is no failing tactic to appease.  But *error* pressure peaks there --
-a wrong invariant baked in at sketch time is the most expensive mistake the system
-can make -- so the sketch is trusted for honesty and audited for correctness.
+sketch: there is no failing tactic to appease.  The sketch is **compiled, not
+consulted**: amending it is amending frozen statements.
 
-The sketch is **compiled, not consulted**.  Compilation is what prevents tactic work
-from silently diverging from the design: amending the sketch is amending frozen
-statements, and goes through the amendment lattice.
+This is the annotation-DSL arm of open decision 5; the skeleton-with-admits arm is a
+plain ``.v`` plan (``pcp prove --plan``).  Both compile to the same graph.
 
-Sketch format (open decision 5 in the plan; this is the annotation-DSL arm, and the
-skeleton-with-admits arm is just a `.v` plan file, which ``pcp prove --plan`` already
-takes -- so both arms compile to the same graph, as the plan requires):
+Format (line-oriented; ``#`` comments; ``--`` trailing comments)::
 
     context `{!heapGS Σ}
-    ghost   γ : authR natUR   -- the counter's authoritative fragment
-
+    ghost   γ : authR natUR
     invariant I : ∃ n, own γ (● n) ∗ l ↦ #n
       alloc: ⊢ |==> ∃ γ, I γ
-
-    function incr (l : loc)
+    function incr
       spec: {{{ True }}} incr #l {{{ RET #(); True }}}
       commit: the CmpXchg that succeeds
       segment load    : ⌜True⌝
@@ -32,7 +26,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-_DIRECTIVE = re.compile(r"^(?P<indent>\s*)(?P<key>[a-z_]+)\s*(?P<name>[\w'γ]*)\s*:?\s*(?P<rest>.*)$")
+_DIRECTIVE = re.compile(r"^\s*(?P<key>[a-z_]+)\s*(?P<name>[^\s:]*)\s*:?\s*(?P<rest>.*)$")
+_KEYS = ("context", "ghost", "invariant", "alloc", "function", "spec", "commit", "segment")
 
 
 @dataclass
@@ -42,12 +37,7 @@ class Invariant:
     alloc: str = ""
 
     def obligations(self) -> list[tuple[str, str]]:
-        """Every invariant carries an inhabitation witness as a sibling node.
-
-        An unsatisfiable interface makes every client lemma vacuously provable and
-        the development rots invisibly (PLAN.md 8.4).  This failure must be loud and
-        immediate, so the witness is an obligation, not a note.
-        """
+        """Every invariant carries an inhabitation witness as a sibling node (PLAN.md 8.4)."""
         alloc = self.alloc or f"⊢ |==> ∃ γ, {self.name} γ"
         return [(f"{self.name}_alloc", f"Lemma {self.name}_alloc : {alloc}.")]
 
@@ -69,19 +59,14 @@ class Function:
         out: list[tuple[str, str]] = []
         if self.spec:
             out.append((f"{self.name}_spec", f"Lemma {self.name}_spec : {self.spec}."))
-        # One stated WP obligation per program segment between assertions, plus glue
-        # obligations connecting them (PLAN.md 9.3).
         for i, seg in enumerate(self.segments):
             out.append((f"{self.name}_seg_{seg.name}", f"Lemma {self.name}_seg_{seg.name} : {seg.assertion}."))
             if i:
                 prev = self.segments[i - 1]
-                out.append(
-                    (
-                        f"{self.name}_glue_{prev.name}_{seg.name}",
-                        f"Lemma {self.name}_glue_{prev.name}_{seg.name} : "
-                        f"({prev.assertion}) -∗ ({seg.assertion}).",
-                    )
-                )
+                out.append((
+                    f"{self.name}_glue_{prev.name}_{seg.name}",
+                    f"Lemma {self.name}_glue_{prev.name}_{seg.name} : ({prev.assertion}) -∗ ({seg.assertion}).",
+                ))
         return out
 
 
@@ -102,7 +87,6 @@ class Sketch:
         return out
 
     def render_plan(self) -> str:
-        """Emit a `.v` plan file -- the same shape `pcp prove --plan` already takes."""
         lines = [
             "(* Compiled from a proof sketch by `pcp sketch`.",
             "",
@@ -115,7 +99,7 @@ class Sketch:
             lines.append(f"(* ghost {name} : {ty} *)")
         if self.ghost:
             lines.append("")
-        for name, statement in self.obligations():
+        for _name, statement in self.obligations():
             lines.append(statement)
             lines.append("Proof. Admitted.")
             lines.append("")
@@ -123,8 +107,7 @@ class Sketch:
 
     def render_summary(self) -> str:
         lines = [
-            f"{len(self.invariants)} invariant(s), {len(self.functions)} function(s) "
-            f"→ {len(self.obligations())} obligations"
+            f"{len(self.invariants)} invariant(s), {len(self.functions)} function(s) → {len(self.obligations())} obligations"
         ]
         for inv in self.invariants:
             lines.append(f"  invariant {inv.name}: {' '.join(inv.body.split())[:80]}")
@@ -133,7 +116,7 @@ class Sketch:
             lines.append(f"  function {fn.name}: {len(fn.segments)} segment(s)")
             if fn.commit:
                 lines.append(f"    commit point: {fn.commit}")
-            elif _is_logatom(fn.spec):
+            elif is_logatom(fn.spec):
                 lines.append("    ! logically atomic spec with no commit point named --")
                 lines.append("      fix it at sketch time; it is a classic multi-day sink later")
         for w in self.warnings:
@@ -159,8 +142,14 @@ class Sketch:
         }
 
 
-def _is_logatom(spec: str) -> bool:
-    return "<<<" in spec or "atomic_update" in spec
+def is_logatom(spec: str) -> bool:
+    return "<<<" in spec or "<<{" in spec or "atomic_update" in spec
+
+
+def _strip_trailing_comment(raw: str) -> str:
+    """Drop a `` -- comment`` (a `--` preceded by whitespace; `-∗` and `->` are untouched)."""
+    m = re.search(r"\s--(\s|$)", raw)
+    return raw[: m.start()] if m else raw
 
 
 def compile_sketch(text: str) -> Sketch:
@@ -169,16 +158,16 @@ def compile_sketch(text: str) -> Sketch:
     current_fn: Function | None = None
 
     for raw in text.splitlines():
-        line = raw.split("--")[0].rstrip() if "--" in raw and not raw.strip().startswith("--") else raw.rstrip()
+        line = _strip_trailing_comment(raw).rstrip()
         if not line.strip() or line.strip().startswith("#"):
             continue
         m = _DIRECTIVE.match(line)
-        if not m:
+        if not m or m.group("key") not in _KEYS:
+            sketch.warnings.append(f"ignored line: {line.strip()[:60]}")
             continue
         key, name, rest = m.group("key"), m.group("name"), m.group("rest").strip()
-
         if key == "context":
-            sketch.context.append((name + " " + rest).strip())
+            sketch.context.append(f"{name} {rest}".strip())
         elif key == "ghost":
             sketch.ghost.append((name, rest))
         elif key == "invariant":
@@ -186,17 +175,19 @@ def compile_sketch(text: str) -> Sketch:
             sketch.invariants.append(current_inv)
             current_fn = None
         elif key == "alloc" and current_inv is not None:
-            current_inv.alloc = (name + " " + rest).strip()
+            current_inv.alloc = f"{name} {rest}".strip()
         elif key == "function":
             current_fn = Function(name=name or "f")
             sketch.functions.append(current_fn)
             current_inv = None
         elif key == "spec" and current_fn is not None:
-            current_fn.spec = (name + " " + rest).strip()
+            current_fn.spec = f"{name} {rest}".strip()
         elif key == "commit" and current_fn is not None:
-            current_fn.commit = (name + " " + rest).strip()
+            current_fn.commit = f"{name} {rest}".strip()
         elif key == "segment" and current_fn is not None:
             current_fn.segments.append(Segment(name=name or f"s{len(current_fn.segments)}", assertion=rest))
+        else:
+            sketch.warnings.append(f"`{key}` outside of an invariant/function: {line.strip()[:60]}")
 
     if not sketch.invariants:
         sketch.warnings.append(
@@ -205,9 +196,6 @@ def compile_sketch(text: str) -> Sketch:
             "the most expensive decision to tactic time."
         )
     for fn in sketch.functions:
-        if _is_logatom(fn.spec) and not fn.commit:
+        if is_logatom(fn.spec) and not fn.commit:
             sketch.warnings.append(f"{fn.name}: logically atomic spec with no commit point identified")
-    # Preservation probes are deliberately absent: stating one requires the pre-step
-    # symbolic state that the proof itself computes, so they are research, not a
-    # deliverable (PLAN.md 9.2).
     return sketch

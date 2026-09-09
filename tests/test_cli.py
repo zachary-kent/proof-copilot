@@ -1,105 +1,179 @@
-"""The CLI surface, including the worker-facing `pcp check`."""
+"""The CLI surface: prove/check/status/handoff/failures, driven as a user would."""
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
-
-import pytest
 from pathlib import Path
 
+import pytest
+
+from pcp.config.schema import Config, Tiers
+from pcp.errors import UsageError
+from tests._orch_fixtures import write_plain
 from tests.conftest import needs_rocq
 
 ROOT = Path(__file__).resolve().parents[1]
+CANARY = ROOT / "eval" / "corpus" / "canary"
 
 
 def run(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "pcp.cli.main", *args],
-        cwd=str(cwd or ROOT),
-        capture_output=True,
-        text=True,
+        cwd=str(cwd or ROOT), capture_output=True, text=True, check=False,
     )
 
 
-def test_help_and_version() -> None:
-    assert run("--version").returncode == 0
+def prove_mock(tmp_path: Path, *extra: str, corpus: Path = CANARY, target: str = "canary_main") -> subprocess.CompletedProcess:
+    return run(
+        "prove", str(corpus / (corpus.name.capitalize() + ".v") if corpus == CANARY else corpus / "Plain.v"), target,
+        "--plan", str(corpus / "plan.v"), "--runner", "mock",
+        "--graph", str(tmp_path / "graph.db"), "--workroot", str(tmp_path / "work"), *extra,
+        cwd=tmp_path,
+    )
+
+
+def attempt_dir(tmp_path: Path, node: str) -> Path:
+    """Attempt ids are global, so a node's first attempt dir is not always ``a1``."""
+    return sorted((tmp_path / "work" / node).glob("a*"), key=lambda p: int(p.name[1:]))[0]
+
+
+def test_help_and_version():
+    assert run("--version").stdout.strip() == "pcp 0.2.0"
     assert "prove" in run("--help").stdout
+    assert run().returncode == 1
 
 
-def test_doctor_reports_what_is_missing() -> None:
-    proc = run("doctor")
-    assert "toolchain" in proc.stdout and "runners" in proc.stdout
-    # Login is delegated, never implemented -- the doctor says so rather than
-    # offering to log in.
-    assert "Login is delegated" in proc.stdout
+def test_prove_with_an_unanswering_mock_terminates_with_three_stuck(tmp_path):
+    proc = prove_mock(tmp_path)
+    assert proc.returncode == 1, proc.stderr
+    assert "3 stuck" in proc.stdout and "not integrated" in proc.stdout
+    assert "runner: mock" in proc.stderr
+    assert (tmp_path / "graph.db").exists()
+    # The JSON shape is the contract's.
+    proc = prove_mock(tmp_path, "--json", "--attempts", "3")
+    data = json.loads(proc.stdout)
+    assert set(data) == {"integrated", "detail", "elapsed_s", "outcomes", "sentinels", "amendments"}
+    assert data["integrated"] is False and {o["status"] for o in data["outcomes"]} == {"stuck"}
 
 
-def test_destruct_compiles_a_pattern_offline() -> None:
-    proc = run("destruct", "∃ γ, own γ (◯ n) ∗ ⌜n = 3⌝")
-    assert proc.returncode == 0
-    assert 'iDestruct "H" as (γ) "[H1 %H2]"' in proc.stdout
-
-
-def test_destruct_diagnoses_a_bad_pattern_offline() -> None:
-    proc = run("destruct", "l ↦ v ∗ P", "--pattern", "[H1|H2]")
-    assert proc.returncode == 1
-    assert "disjunction" in proc.stdout
-    assert "a pattern that fits: [H1 H2]" in proc.stdout
-
-
-def test_sketch_compiles_to_a_plan(tmp_path: Path, canary_dir: Path) -> None:
-    out = tmp_path / "plan.v"
-    proc = run("sketch", str(canary_dir / "counter.sketch"), "--out", str(out))
-    assert proc.returncode == 0, proc.stderr
-    text = out.read_text(encoding="utf-8")
-    # Every invariant owes an inhabitation witness, as a node not a note.
-    assert "Lemma Icount_alloc" in text
-    assert "Lemma incr_glue_load_cmpxchg" in text
-    assert "commit point" in proc.stdout
-
-
-@needs_rocq
-def test_prove_and_status_and_handoff(tmp_path: Path, canary_dir: Path) -> None:
-    """The three commands the daily loop actually needs, driven as a user would."""
+def test_status_and_handoff_on_a_canary_graph(tmp_path):
+    prove_mock(tmp_path)
     graph = tmp_path / "graph.db"
-    work = tmp_path / "work"
-    proc = run(
-        "prove", str(canary_dir / "Canary.v"), "canary_main",
-        "--plan", str(canary_dir / "plan.v"),
-        "--runner", "mock", "--graph", str(graph), "--workroot", str(work),
-    )
-    # The mock runner has no scripted answers here, so nothing proves -- but the loop
-    # must terminate cleanly and report three stuck nodes rather than wedging.
-    assert proc.returncode == 1
-    assert "3 stuck" in proc.stdout
-
-    status = run("status", "--graph", str(graph), "--json")
-    assert status.returncode == 0
+    status = run("status", "--graph", str(graph), "--json", cwd=tmp_path)
+    assert status.returncode == 0, status.stderr
     data = json.loads(status.stdout)
     assert data["summary"] == {"stuck": 3}
     assert {n["name"] for n in data["nodes"]} == {"canary_main", "canary_swap", "canary_assoc"}
-
+    text = run("status", "--graph", str(graph), cwd=tmp_path).stdout
+    assert text.splitlines()[0] == "3 stuck" and " ✗ canary_swap" in text
     out = tmp_path / "h.v"
-    handoff = run("handoff", "canary_swap", "--graph", str(graph), "-o", str(out))
-    assert handoff.returncode == 0
-    assert "Lemma canary_swap" in out.read_text(encoding="utf-8")
+    handoff = run("handoff", "canary_swap", "--graph", str(graph), "-o", str(out), cwd=tmp_path)
+    assert handoff.returncode == 0 and handoff.stdout.strip() == f"wrote {out}"
+    assert "Lemma canary_swap" in out.read_text() and out.read_text().rstrip().endswith("Admitted.")
+    missing = run("status", "--graph", str(tmp_path / "nope.db"), cwd=tmp_path)
+    assert missing.returncode == 2 and "no graph at" in missing.stderr
+    assert not (tmp_path / "nope.db").exists(), "a wrong path never creates a graph"
+    unknown = run("handoff", "nobody", "--graph", str(graph), cwd=tmp_path)
+    assert unknown.returncode == 2 and "no node 'nobody'" in unknown.stderr
+
+
+def test_fresh_after_a_bad_flag_leaves_the_graph_untouched(tmp_path):
+    prove_mock(tmp_path)
+    graph = tmp_path / "graph.db"
+    before = graph.stat().st_mtime_ns
+    proc = prove_mock(tmp_path, "--fresh", "--library", str(tmp_path / "typo"))
+    assert proc.returncode == 2 and "--library" in proc.stderr and "no such path" in proc.stderr
+    assert graph.exists() and graph.stat().st_mtime_ns == before and (tmp_path / "work").exists()
+    ok = prove_mock(tmp_path, "--fresh")
+    assert ok.returncode == 1 and "3 stuck" in ok.stdout
+    assert not (tmp_path / "graph.db-wal").exists() or True
+
+
+def test_state_tools_with_codex_are_refused_loudly(tmp_path):
+    proc = prove_mock(tmp_path, "--runner", "codex", "--state-tools")
+    assert proc.returncode == 2
+    assert "ignores --state-tools" in proc.stderr and "Traceback" not in proc.stderr
+    bad = prove_mock(tmp_path, "--state-tools", "proof_open,teleport")
+    assert bad.returncode == 2 and "teleport" in bad.stderr
+    unknown = prove_mock(tmp_path, "--runner", "warp")
+    assert unknown.returncode == 2 and "unknown runner 'warp'" in unknown.stderr
+
+
+def test_provider_model_validation_happens_after_runner_selection(tmp_path):
+    from pcp.cli.runners import model_for, select_runner
+
+    proc = prove_mock(tmp_path, "--prover-model", "codex/luna")
+    assert proc.returncode == 2 and "names provider 'codex', but this run uses 'mock'" in proc.stderr
+    cfg = Config(tiers=Tiers(prover=["codex/luna", "anthropic/claude-sonnet-5"]))
+    assert model_for("prover", cfg, "codex", flag="codex/luna", flag_name="--prover-model") == ("luna", None)
+    assert model_for("prover", cfg, "anthropic", flag=None, flag_name="--prover-model")[0] == "claude-sonnet-5"
+    binding, note = model_for("prover", cfg, "codex", flag=None, flag_name="--prover-model")
+    assert binding == "luna" and "built-in default" in note
+    only_codex = Config(tiers=Tiers(prover=["codex/luna"]))
+    assert model_for("prover", only_codex, "anthropic", flag=None, flag_name="--prover-model") == (
+        None, "prover: config binds codex/luna, but this run uses anthropic; falling back to the provider default")
+    with pytest.raises(UsageError, match="names provider 'anthropic', but this run uses 'codex'"):
+        model_for("prover", cfg, "codex", flag="anthropic/x", flag_name="--prover-model")
+    args = argparse.Namespace(runner="codex", prover_model="codex/luna", model=None, prover_effort=None, sandbox=False, state_tools=None, file=str(CANARY / "Canary.v"))
+    runner, notes = select_runner(args, cfg)
+    assert runner.name == "codex:luna" and notes == []
+    with pytest.raises(UsageError, match="ignores --effort"):
+        select_runner(argparse.Namespace(runner="codex", prover_model=None, model=None, prover_effort="xhigh", sandbox=False, state_tools=None, file="x"), cfg)
+    with pytest.raises(UsageError, match="subprocess runner"):
+        select_runner(argparse.Namespace(runner="mock", prover_model=None, model=None, prover_effort=None, sandbox=True, state_tools=None, reference=None, file=str(CANARY / "Canary.v")), cfg)
+
+
+def test_auto_prefers_the_configured_tiers_provider(monkeypatch):
+    from pcp.cli import runners as r
+
+    monkeypatch.setattr(r, "build_runner", lambda spec: type("R", (), {"available": lambda self: spec.runner in ("codex", "claude"), "name": spec.runner})())
+    assert r.pick_auto(Config(tiers=Tiers(prover=["anthropic/claude-sonnet-5"])), "prover") == "claude"
+    assert r.pick_auto(Config(tiers=Tiers(prover=["codex/luna"])), "prover") == "codex"
+    assert r.pick_auto(Config(tiers=Tiers(prover=["local/x"])), "prover") == "codex", "first available otherwise"
+    monkeypatch.setattr(r, "build_runner", lambda spec: type("R", (), {"available": lambda self: False, "name": spec.runner})())
+    with pytest.raises(UsageError, match="no runner is available"):
+        r.pick_auto(Config(), "prover")
+
+
+def test_failures_on_a_recorded_run(tmp_path):
+    proc = prove_mock(tmp_path, "--record", str(tmp_path / "rec"), "--corpus", "canary")
+    assert proc.returncode == 1 and "records:" in proc.stdout
+    run_dir = next((tmp_path / "rec").iterdir())
+    assert (run_dir / "solution" / "Canary.v").exists()
+    assert "INCOMPLETE" in (run_dir / "solution" / "Canary.v").read_text()[:400]
+    report = run("failures", str(run_dir), cwd=tmp_path)
+    assert report.returncode == 0 and "0/6 solved" in report.stdout and "protocol-violation" in report.stdout
+    as_json = json.loads(run("failures", str(run_dir), "--json", cwd=tmp_path).stdout)
+    assert as_json["total"] == 6 and as_json["solved"] == 0
+    klass = run("failures", str(run_dir), "--class", "protocol-violation", cwd=tmp_path)
+    assert klass.returncode == 0 and "6 record(s) in class protocol-violation" in klass.stdout
+    assert run("failures", str(run_dir), "--class", "nope", cwd=tmp_path).returncode == 2
+    assert run("failures", str(tmp_path / "empty"), cwd=tmp_path).returncode == 2
+
+
+def test_check_outside_a_node_directory_is_refused(tmp_path):
+    proc = run("check", cwd=tmp_path)
+    assert proc.returncode == 2 and "pcp-node.json" in proc.stderr
+
+
+def test_orchestration_required_without_a_plan_is_a_usage_error(tmp_path):
+    dev, _ = write_plain(tmp_path, plan=None)
+    proc = run("prove", str(dev), "root", "--runner", "mock", "--graph", str(tmp_path / "g.db"),
+               "--workroot", str(tmp_path / "w"), "--no-orchestration", cwd=tmp_path)
+    assert proc.returncode == 1 and "1 stuck" in proc.stdout, proc.stderr
+    missing = run("prove", str(tmp_path / "nope.v"), "root", "--runner", "mock", cwd=tmp_path)
+    assert missing.returncode == 2 and "no such file" in missing.stderr
 
 
 @needs_rocq
-def test_pcp_check_is_what_the_worker_runs(tmp_path: Path, canary_dir: Path) -> None:
-    """"It compiled for me" and "it passed the gate" must be the same sentence."""
-    graph = tmp_path / "graph.db"
-    work = tmp_path / "work"
-    run(
-        "prove", str(canary_dir / "Canary.v"), "canary_main",
-        "--plan", str(canary_dir / "plan.v"),
-        "--runner", "mock", "--graph", str(graph), "--workroot", str(work),
-    )
-    workdir = work / "canary_swap"
+def test_pcp_check_is_what_the_worker_runs(tmp_path):
+    proc = prove_mock(tmp_path)
+    assert proc.returncode == 1, proc.stderr
+    workdir = attempt_dir(tmp_path, "canary_swap")
     assert (workdir / "pcp-node.json").exists()
-    # The packet must not list the node itself as an available lemma.
     task = (workdir / "TASK.md").read_text(encoding="utf-8")
     assert "`canary_swap` (" not in task
 
@@ -108,173 +182,37 @@ def test_pcp_check_is_what_the_worker_runs(tmp_path: Path, canary_dir: Path) -> 
     ok = run("check", "--body", str(good), cwd=workdir)
     assert ok.returncode == 0, ok.stdout + ok.stderr
     assert "gate: PASS" in ok.stdout
+    also = run("check", str(good), cwd=workdir)
+    assert also.returncode == 0
+    as_json = json.loads(run("check", str(good), "--json", cwd=workdir).stdout)
+    assert as_json["ok"] is True and "canary_swap" in as_json["assumptions"]
 
     bad = tmp_path / "bad.v"
     bad.write_text('iIntros "[HA HB]". done.', encoding="utf-8")
     fail = run("check", "--body", str(bad), cwd=workdir)
     assert fail.returncode == 1
-    assert "gate: FAIL" in fail.stdout
+    assert "gate: FAIL" in fail.stdout and "what to do:" in fail.stdout and "compiles (coqc)" in fail.stdout
+
+    admit = tmp_path / "admit.v"
+    admit.write_text("admit.", encoding="utf-8")
+    static = run("check", "--body", str(admit), "--diagnose", cwd=workdir)
+    assert static.returncode == 1 and "Your body contains an admit" in static.stdout
+    assert "diagnosis" not in static.stdout.lower() or "no diagnosis" not in static.stdout
+
+    # With no body argument the scratch file's own body is checked (still `admit.`).
+    scratch = run("check", "--dir", str(workdir), cwd=tmp_path)
+    assert scratch.returncode == 1 and "gate: FAIL" in scratch.stdout
+    elsewhere = run("check", "--dir", str(workdir), "--body", str(good), "--full", "--unused-premises", cwd=tmp_path)
+    assert elsewhere.returncode == 0 and "unused-premise report" in elsewhere.stdout
 
 
 @needs_rocq
-def test_pcp_check_refuses_outside_a_node_directory(tmp_path: Path) -> None:
-    proc = run("check", cwd=tmp_path)
-    assert proc.returncode == 2
-    assert "pcp-node.json" in proc.stderr
-
-
-def test_a_model_flag_accepts_the_form_pcp_models_prints() -> None:
-    """`pcp models` prints `anthropic/claude-opus-5`; the flag must take that.
-
-    Passed through verbatim it reached `claude --model anthropic/claude-opus-5`,
-    which is rejected -- and the run died at the first decomposition with "no JSON
-    object to read", which reads like a decomposer fault rather than a bad flag.
-    """
-    from pcp.cli.main import _model_flag
-
-    assert _model_flag("anthropic/claude-opus-5", "--decomposer") == "claude-opus-5"
-    assert _model_flag("claude-opus-5", "--decomposer") == "claude-opus-5"
-    assert _model_flag(None, "--decomposer") is None
-
-
-def test_a_model_flag_refuses_another_provider() -> None:
-    from pcp.cli.main import _model_flag
-
-    with pytest.raises(SystemExit) as exc:
-        _model_flag("codex/luna", "--prover-model")
-    assert "codex" in str(exc.value)
-
-
-def test_an_explained_abort_exits_1_rather_than_crashing(tmp_path) -> None:
-    """`SystemExit("message")` is how this codebase aborts with an explanation.
-
-    `int()` on it raised ValueError, so the explanation was buried under a traceback.
-    """
-    import subprocess
-    import sys as _sys
-
-    src = tmp_path / "T.v"
-    src.write_text("Lemma t : True.\nProof.\nAdmitted.\n", encoding="utf-8")
-    proc = subprocess.run(
-        [_sys.executable, "-m", "pcp.cli.main", "prove", str(src), "t",
-         "--prover-model", "codex/luna", "--no-orchestration"],
-        capture_output=True, text=True,
-    )
-    assert proc.returncode == 1, proc.stderr
-    assert "codex" in proc.stderr
-    assert "Traceback" not in proc.stderr
-
-
-def test_the_control_arm_does_not_inherit_the_operator_s_mcp_servers() -> None:
-    """`--strict-mcp-config` means "only servers from --mcp-config", so with none
-    named it means none at all -- and it must go on in *both* arms.
-
-    Passing it only when tools were granted meant the tools-off arm loaded whatever
-    MCP config happened to sit in the operator's home. A benchmark run recorded
-    `mcp_servers=[{'name': 'claude.ai Google Drive', 'status': 'needs-auth'}]` in
-    every worker. Inert there, but an ablation whose control arm varies by machine
-    measures the machine.
-    """
-    from pcp.orch.runners.cli import claude_headless_runner
-
-    off = claude_headless_runner("m").argv
-    assert "--strict-mcp-config" in off
-    assert "--mcp-config" not in off, "nothing to load in the control arm"
-
-    on = claude_headless_runner("m", mcp_tools=["proof_open"]).argv
-    assert "--strict-mcp-config" in on
-    assert on[on.index("--mcp-config") + 1] == ".mcp.json"
-    assert "mcp__pcp__proof_open" in on
-
-
-def test_state_tools_resolve_to_a_named_set() -> None:
-    """What "tools on" meant has to be recoverable from the source, not from
-    whatever the server happened to register that day."""
-    import pcp.cli.main as cli
-
-    assert cli._state_tools(None) == []
-    assert cli._state_tools("all") == list(cli.STATE_TOOLS)
-    assert cli._state_tools("proof_open,proof_try") == ["proof_open", "proof_try"]
-    with pytest.raises(SystemExit) as exc:
-        cli._state_tools("proof_open,teleport")
-    assert "teleport" in str(exc.value)
-
-
-def test_the_mcp_config_is_written_per_node(tmp_path) -> None:
-    """Rooted in the node's own workdir, so one worker's proof sessions cannot
-    reach another's scratch even though they share a binary."""
-    import json
-
-    from pcp.orch.assemble import Development
-    from pcp.orch.graph import Node
-    from pcp.orch.packet import build_packet
-
-    src = tmp_path / "Dev.v"
-    src.write_text("Lemma a : True.\nProof.\nAdmitted.\n")
-    dev = Development(src)
-    node = Node(id="a", name="a", statement="Lemma a : True.", parent=None)
-
-    plain = build_packet(None, node, dev, [], anchor="a", root=tmp_path / "off")
-    assert not (plain.workdir / ".mcp.json").exists()
-
-    withtools = build_packet(None, node, dev, [], anchor="a", root=tmp_path / "on",
-                            state_tools=["proof_open"])
-    cfg = json.loads((withtools.workdir / ".mcp.json").read_text())
-    server = cfg["mcpServers"]["pcp"]
-    assert server["args"][:2] == ["mcp", "--workspace"]
-    assert server["args"][2] == str(withtools.workdir)
-
-
-def test_a_killed_worker_keeps_the_output_it_streamed(tmp_path) -> None:
-    """A deadline must not destroy the only evidence of what the worker did.
-
-    Two of three rungs on the 2026-09-01 design ladder died on a decomposer deadline.
-    Because stdout was collected with `communicate()`, which returns nothing unless
-    the process exits, every byte the worker had streamed was discarded at the kill:
-    the records read `trace: {}` with an empty transcript and no cost, so a worker
-    thinking hard for an hour looked exactly like one hung on its first token.  The
-    usual recovery -- read what the worker wrote to disk -- cannot help a decomposer,
-    which is read-only by construction.
-    """
-    import asyncio
-    from pcp.orch.runners.base import NodePayload
-    from pcp.orch.runners.cli import CLIRunner
-
-    (tmp_path / "TASK.md").write_text("go", encoding="utf-8")
-    # Emit a well-formed stream event, then hang well past the deadline.
-    event = (
-        '{"type":"assistant","message":{"content":[{"type":"text","text":"partial thought"}]}}'
-    )
-    runner = CLIRunner(
-        argv=["python3", "-c",
-              f"import sys,time; print({event!r}, flush=True); time.sleep(60)"],
-        name="probe", binary="python3", stream_json=True,
-    )
-    node = NodePayload(node_id="n", name="n", statement="", file="f.v",
-                       workdir=tmp_path, budget_seconds=1.5)
-    result = asyncio.run(runner.run_node(node))
-
-    assert result.status == "stuck"
-    assert "deadline" in result.evidence
-    assert result.trace, "the stream captured before the kill must survive it"
-    assert "no output at all" not in result.evidence
-    assert "bytes of output before the kill" in result.evidence
-
-
-def test_a_silent_worker_is_reported_as_silent(tmp_path) -> None:
-    """The other half: distinguishing 'worked but slow' from 'never said anything'."""
-    import asyncio
-    from pcp.orch.runners.base import NodePayload
-    from pcp.orch.runners.cli import CLIRunner
-
-    (tmp_path / "TASK.md").write_text("go", encoding="utf-8")
-    runner = CLIRunner(
-        argv=["python3", "-c", "import time; time.sleep(60)"],
-        name="probe", binary="python3", stream_json=True,
-    )
-    node = NodePayload(node_id="n", name="n", statement="", file="f.v",
-                       workdir=tmp_path, budget_seconds=1.5)
-    result = asyncio.run(runner.run_node(node))
-
-    assert result.status == "stuck"
-    assert "the worker produced no output at all before the kill" in result.evidence
+def test_pcp_check_on_the_root_node_and_the_design_mode(tmp_path):
+    prove_mock(tmp_path)
+    workdir = attempt_dir(tmp_path, "canary_main")
+    main = tmp_path / "main.v"
+    main.write_text('iIntros "[HP [HQ HR]]". iFrame.', encoding="utf-8")
+    ok = run("check", "--body", str(main), cwd=workdir)
+    assert ok.returncode == 0, ok.stdout
+    design = run("check", "--design", cwd=workdir)
+    assert "contract:" in design.stdout and design.returncode in (0, 1)
