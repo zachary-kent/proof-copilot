@@ -4,7 +4,7 @@ How to give an interactive agent the `pcp` proof-state tools and the prover norm
 integrations assume the `pcp` CLI is installed and its toolchain works:
 
 ```bash
-uv tool install 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@vX.Y.Z'
+uv tool install --python 3.11 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@vX.Y.Z'
 pcp setup      # the pinned Rocq / coq-lsp / Iris switch (tens of minutes, once)
 pcp doctor     # everything below depends on this being clean
 ```
@@ -141,7 +141,7 @@ AGENTS.md block is the supported route.
   `pcp integrate claude` prints (user scope), or `pcp integrate codex --write`, which
   writes the absolute path by default.
 - **"no usable MCP server API found".** pcp was installed without the extra. Reinstall
-  with `uv tool install --force 'proof-copilot[mcp] @ git+…'`.
+  with `uv tool install --python 3.11 --force 'proof-copilot[mcp] @ git+…'`.
 - **A tool reports the toolchain or opam switch missing.** Run `pcp doctor`. pcp finds its
   switch by itself (`$PCP_OPAM_SWITCH`, else the switch named `pcp`), with no login shell
   or `opam env` needed. If the switch is missing, run `pcp setup`. For a switch with

@@ -20,7 +20,7 @@ command -v pcp && pcp --version
 If missing, install it (the `[mcp]` extra is what `pcp mcp` needs):
 
 ```bash
-uv tool install 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@vX.Y.Z'
+uv tool install --python 3.11 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@vX.Y.Z'
 # or: pipx install 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@vX.Y.Z'
 ```
 
