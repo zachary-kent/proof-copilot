@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "pcp": {
+      "command": "pcp",
+      "args": [
+        "mcp",
+        "--workspace",
+        "${CLAUDE_PROJECT_DIR}"
+      ]
+    }
+  }
+}

@@ -5,11 +5,10 @@ resort -- audits are *event-driven*, and one of the events is a sentinel hit.
 
 Only the *free* sentinels live here (no compile): duplicates by hash, the "no
 lateral moves" reduction check, converging failures, the partial-correctness flag
-and the hypothesis-hygiene comparison.  The costed vacuity probe is not built; the
-``vacuity_probes`` flag stays off and nothing reads it.
+and the hypothesis-hygiene comparison.  The costed vacuity probe is not built.
 
-Every text scan goes through :mod:`pcp.rocq.lexer`/:mod:`pcp.rocq.statement`: the
-legacy regexes were fooled by comments, newlines and Texan triples.
+Every text scan goes through :mod:`pcp.rocq.lexer`/:mod:`pcp.rocq.statement`, so
+comments, newlines and Texan triples cannot fool a check.
 """
 
 from __future__ import annotations

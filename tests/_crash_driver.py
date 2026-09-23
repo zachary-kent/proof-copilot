@@ -1,6 +1,6 @@
 """Run ``prove()`` on the canary and die with ``os._exit`` at a chosen phase.
 
-Used by ``tests/test_review_pipeline.py`` as a subprocess: a real process death runs
+Used by ``tests/test_resume.py`` as a subprocess: a real process death runs
 no ``finally`` blocks, checkpoints no WAL and releases the run lock only through the
 kernel -- what an in-process ``BaseException`` cannot simulate.
 

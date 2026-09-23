@@ -5,7 +5,7 @@ visible**: every render ends with ``rendered a/b hypotheses · t/limit token bud
 a manifest of what was left out and why.  A model that knows it is looking at a partial
 view asks for more; a model that does not, hallucinates.
 
-Policy, in priority order (each a legacy bug when it was implicit in loop order):
+Policy, in priority order (each is explicit here, not implicit in loop order):
 
 1. the goal is charged *first* -- hypotheses cannot starve it;
 2. an **explicitly** selected hypothesis (by id, ``mentions:``, ``head:``) is shown even
@@ -157,7 +157,7 @@ def _relevant_set(goal: IrisGoal, relevant_to: str | None) -> set[str] | None:
     """Ids of the hypotheses whose head symbols intersect the goal's (or the tactic's).
 
     ``None`` means "do not filter": nothing intersected, and hiding every spatial
-    resource on a WP goal is worse than no filter at all (legacy bug).
+    resource on a WP goal is worse than no filter at all.
     """
     goal_heads = heads(goal.goal)
     named: set[str] = set()

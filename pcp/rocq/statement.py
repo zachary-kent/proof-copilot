@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from pcp.rocq.lexer import skip_comment, skip_string, strip_comments
+from pcp.rocq.lexer import skip_string, strip_comments
 from pcp.util.hashing import content_hash
 
 
@@ -15,10 +15,6 @@ def normalize_statement(text: str) -> str:
 
 def statement_hash(text: str) -> str:
     return content_hash(normalize_statement(text), prefix="s:")
-
-
-def same_statement(a: str, b: str) -> bool:
-    return normalize_statement(a) == normalize_statement(b)
 
 
 def split_head(statement: str) -> tuple[str, str, str]:
@@ -156,7 +152,3 @@ def statement_name(statement: str) -> str | None:
 
     blocks = parse_blocks(statement)
     return blocks[0].name if blocks else None
-
-
-def _unused(_: str) -> None:  # keep the lexer import honest for type checkers
-    skip_comment("", 0)

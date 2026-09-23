@@ -1,8 +1,12 @@
 """Shared helpers for the pipeline tests: a plain (Iris-free) development, a plan, a
-scripted gate that needs no compiler, and a graph builder."""
+scripted gate that needs no compiler, a graph builder, and runners/recorders that
+misbehave on purpose."""
 
 from __future__ import annotations
 
+import asyncio
+import json
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -10,6 +14,7 @@ from typing import Any
 from pcp.orch.gate import CHECK_COMPILES, Check, GateResult
 from pcp.orch.graph import Graph
 from pcp.orch.model import Budget, Node, node_id
+from pcp.orch.protocol import NodePayload, NodeResult
 from pcp.orch.runners.mock import WRONG_PROOF
 from pcp.rocq.assemble import Development
 
@@ -103,3 +108,68 @@ class FakeGate:
 
     def run_design(self, *a: Any, **kw: Any) -> GateResult:
         return GateResult(ok=True, checks=[])
+
+
+class HangingRunner:
+    """Never returns and never honours ``budget_seconds``: a broken runner."""
+
+    name = "hang"
+
+    def __init__(self, write_answer: dict | None = None) -> None:
+        self.write_answer = write_answer
+
+    def available(self) -> bool:
+        return True
+
+    async def run_node(self, node: NodePayload) -> NodeResult:
+        if self.write_answer is not None:
+            (Path(node.workdir) / "answer.json").write_text(json.dumps(self.write_answer), encoding="utf-8")
+        await asyncio.sleep(3600)
+        return NodeResult(status="stuck")
+
+
+class BadRecorder:
+    """A recorder whose disk is full."""
+
+    run_id = "r"
+    root = Path("/nonexistent")
+
+    def write(self, *a: Any, **k: Any):
+        raise OSError(28, "No space left on device")
+
+
+class ScriptedDecomposerRunner:
+    """Answers each decomposer call with the next scripted reply (the last one repeats)."""
+
+    name = "scripted-decomposer"
+
+    def __init__(self, answers: list[str]):
+        self.answers, self.calls = list(answers), 0
+
+    def available(self) -> bool:
+        return True
+
+    async def run_node(self, node: NodePayload) -> NodeResult:
+        text = self.answers[min(self.calls, len(self.answers) - 1)]
+        self.calls += 1
+        return NodeResult(status="qed", raw=text, trace={"final_text": text, "model": "scripted"})
+
+
+def bounded(fn: Any, seconds: float = 5.0) -> Any:
+    """Run ``fn`` in a thread and fail if it has not returned within ``seconds`` -- a
+    reader that blocks on a FIFO would otherwise hang the test."""
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["result"] = fn()
+        except BaseException as exc:  # noqa: BLE001
+            box["error"] = exc
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(seconds)
+    assert not t.is_alive(), "the reader blocked"
+    if "error" in box:
+        raise box["error"]
+    return box["result"]

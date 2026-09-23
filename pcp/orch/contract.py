@@ -25,7 +25,6 @@ moved comment is not a change and ``A.x``/``B.x`` are two declarations.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -82,9 +81,8 @@ class DesignContract:
     allow_additions: bool = True
     allow_imports: bool = True
     #: Every declaration name of the ORIGINAL corpus file.  A name absent from it was
-    #: introduced by a design, is design-owned, and stays amendable: the first spec-only
-    #: seqlock_wf run refused to repair the registry definition the design itself had
-    #: added because it was "not declared mutable" (review finding).  Empty = unknown,
+    #: introduced by a design, is design-owned, and stays amendable (a definition the
+    #: design itself added is never refused as "not declared mutable").  Empty = unknown,
     #: which fails closed to the `mutable` list.
     frozen_names: frozenset[str] = field(default_factory=frozenset)
     #: Heads a new declaration may have, when additions are allowed.
@@ -121,7 +119,7 @@ class DesignContract:
         """``design.json`` > ``bench.json`` > everything frozen; results ∪= held-out names.
 
         A corpus directory that does not exist is an error, not "nothing mutable":
-        the legacy fallback silently produced a contract that refused every design.
+        a silent fallback would produce a contract that refuses every design.
         """
         corpus = Path(corpus)
         if not corpus.is_dir():
@@ -266,9 +264,3 @@ def _require_lines(source: str) -> set[str]:
         if fw == "Require" or (fw == "From" and " Require" in " ".join(code.split())):
             out.add(" ".join(code.split()))
     return out
-
-
-def load_contract_json(path: str | Path) -> DesignContract:
-    """Read a ``design.json`` on its own (no ``bench.json`` beside it)."""
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return DesignContract.from_json(data)

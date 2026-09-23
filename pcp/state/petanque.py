@@ -153,10 +153,10 @@ def pet_wrapper(binary: str, mem_limit_mb: int) -> Path:
     """A ``pet`` (or ``pet-server``) wrapper that caps its address space, then execs.
 
     Written atomically (temp file + rename) into a per-uid, mode-0700 directory, so a
-    concurrent process never execs a truncated or world-writable script (v1 wrote it
-    with ``write_text`` + ``chmod`` from every cold process).  ``exec`` means the pid we
-    hold *is* ``pet``, which is what :func:`kill_tree` needs.  No ``setpriv
-    --pdeathsig``: see the module docstring.
+    concurrent process never execs a truncated or world-writable script, however many
+    cold processes race to write it.  ``exec`` means the pid we hold *is* ``pet``,
+    which is what :func:`kill_tree` needs.  No ``setpriv --pdeathsig``: see the module
+    docstring.
     """
     real = str(Path(binary).resolve())
     root = Path(tempfile.gettempdir()) / f"pcp-pet-{os.getuid()}-{mem_limit_mb}"
@@ -262,7 +262,7 @@ class PetProcess:
         pytanque = _pytanque()
         binary = penv.pet_binary()
         if binary is None:
-            raise ToolchainError("no `pet` binary on PATH (run ./scripts/setup-toolchain.sh, then `. ./env.sh`)")
+            raise ToolchainError("no `pet` binary on PATH or in the pinned switch (run `pcp setup`; see `pcp doctor`)")
         wrapper = pet_wrapper(binary, self.mem_limit_mb)
         self._proc = subprocess.Popen(
             [str(wrapper)],

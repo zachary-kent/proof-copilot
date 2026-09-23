@@ -45,8 +45,8 @@ def test_every_goal_parses(parsed) -> None:
         assert goal is not None, f"{row['file']}:{row['thm']}"
 
 
-#: An *independent* count: quoted names AND the unquoted anonymous `_ :` form.  v1's
-#: cross-check counted quoted lines only and shared the parser's blind spot.
+#: An *independent* count: quoted names AND the unquoted anonymous `_ :` form, so the
+#: cross-check cannot share a blind spot with the parser.
 _HYP_LINE = re.compile(r'^(?:\s*"[^"]*"(?:\s+"[^"]*")*|_)\s*:', re.M)
 
 
@@ -147,7 +147,7 @@ def test_skeleton_parses_every_real_prop(parsed) -> None:
 
 
 def test_binders_in_operand_position_are_seen(parsed) -> None:
-    """`P -∗ ∃ x, Q x` prints without parentheses; v1 made the whole prop an atom."""
+    """`P -∗ ∃ x, Q x` prints without parentheses and still splits; it is not one atom."""
     seen = 0
     for _, goal in parsed:
         for h in goal.ipm_hyps:

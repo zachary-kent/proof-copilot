@@ -35,7 +35,7 @@ def script_tactics(text: str) -> list[str]:
     """A script file as tactic sentences, by the lexer -- not by physical line.
 
     A tactic wrapped over two lines is one sentence and a comment line is no sentence
-    at all (v1 split on newlines and sent both halves, and comments, to Rocq).
+    at all; neither half of a wrapped tactic, nor a comment, is sent to Rocq alone.
     """
     from pcp.rocq.lexer import split_sentences
 
@@ -60,8 +60,8 @@ class TraceRun:
         """``reflect`` builds ``IDump`` under ``coq_root`` and spawns the pool with it on the load path.
 
         The env is passed to the pool, never written into ``os.environ``, and keeps every
-        existing ``ROCQPATH``/``COQPATH`` entry (v1 overwrote ``ROCQPATH`` with a
-        ``COQPATH``-derived value and lost Iris on a ROCQPATH-only machine).
+        existing ``ROCQPATH``/``COQPATH`` entry (overwriting ``ROCQPATH`` with a
+        ``COQPATH``-derived value would lose Iris on a ROCQPATH-only machine).
         """
         from pcp.state.ipm.reflect import REQUIRE, Reflector, build_idump, env_with_idump
         from pcp.state.ledger.diff import attach
@@ -89,8 +89,8 @@ class TraceRun:
     def annotate(self) -> None:
         """The persistence oracle on the focused goal of every successful step, at that step's state.
 
-        v1 probed every step at the *final* state, so a hypothesis consumed earlier
-        answered "error" and a later namesake answered for the wrong prop.
+        Probing every step at the *final* state would make a hypothesis consumed earlier
+        answer "error" and a later namesake answer for the wrong prop.
         """
         from pcp.state.ipm.oracle import annotate
 
@@ -166,8 +166,8 @@ def cmd_state(args: argparse.Namespace) -> int:
     if not step.ok:
         note(f"step {step.step} failed ({step.error}); showing the goals before it")
     for i, goal in enumerate(step.goals):
-        # Positional baseline: goal i against the previous goal i (v1 diffed every goal
-        # against the previous *first* goal, so a split's second goal read as all-changed).
+        # Positional baseline: goal i against the previous goal i (against the previous
+        # *first* goal, a split's second goal would read as all-changed).
         base = prev_goals[i] if i < len(prev_goals) else None
         rendered = render_goal(
             goal,
@@ -211,7 +211,7 @@ def cmd_ledger(args: argparse.Namespace) -> int:
         print(render_provenance(where_did_it_go(trace, args.hyp)))
     elif query == "blame":
         # The failed step, else the one that would run next -- never a step past the
-        # end of a stopped trace (v1: `len(steps)`).
+        # end of a stopped trace (not `len(steps)`).
         if args.step is not None:
             at = args.step
         elif trace.failed_at is not None:

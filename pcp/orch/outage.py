@@ -404,7 +404,6 @@ class ProviderPause:
         self._resume.set()
         self.current: Outage | None = None
         self.exhausted: Outage | None = None
-        self.pauses = 0
         self.waited_s = 0.0
         self.last_wait_s = 0.0
         self._last_resume: float | None = None
@@ -412,10 +411,6 @@ class ProviderPause:
     @property
     def enabled(self) -> bool:
         return self.policy.active
-
-    @property
-    def paused(self) -> bool:
-        return self.current is not None
 
     async def wait_if_paused(self) -> None:
         """Dispatchers call this before starting anything new; in-flight work never does."""
@@ -438,7 +433,6 @@ class ProviderPause:
             return self.exhausted is None
         self.current = outage
         self._resume.clear()
-        self.pauses += 1
         started = _now()
         self._event("run.paused", kind=outage.kind, detail=outage.detail, resume_at=outage.resume_at, max_wait_s=self.policy.max_wait_s)
         probe = self.probe

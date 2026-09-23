@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
+import shutil
+from pathlib import Path
 
 import pytest
 
 from pcp.orch.contract import DesignContract
-from pcp.orch.decomposer import DecompositionResult, parse_proposal
+from pcp.orch.decomposer import DecompositionResult, parse_payload, parse_proposal
+from pcp.orch.graph import Graph
 from pcp.orch.model import Node, node_id
-from pcp.orch.protocol import NodeResult
-from pcp.orch.prove import OrchestrationRequired, ProveConfig, prove
+from pcp.orch.packet import build_packet
+from pcp.orch.prove import DesignFailed, OrchestrationRequired, ProveConfig, ProveResult, freeze_target, prove
 from pcp.orch.prove.design import (
     DECOMPOSE_DEADLINE_RETRIES,
     DesignDriver,
@@ -24,17 +28,22 @@ from pcp.orch.prove.design import (
     design_dir,
     design_evidence,
     design_failed,
+    design_rounds_used,
     place_additions,
     refresh_after_revision,
     scan_fragment,
     stage_spec_only,
+    standing_failures,
     why_it_failed,
 )
 from pcp.orch.runners.mock import MockRunner
-from pcp.orch.schedule import NodeOutcome, RunReport
-from pcp.rocq.assemble import NodeSpec
-from tests._orch_fixtures import build_plain_graph, plain_cfg
+from pcp.orch.schedule import NodeOutcome, RunReport, siblings_of
+from pcp.orch.sentinels import SentinelReport
+from pcp.rocq.assemble import Development, NodeSpec
+from tests._orch_fixtures import ScriptedDecomposerRunner, build_plain_graph, plain_cfg
 from tests.conftest import needs_rocq
+
+ROOT = Path(__file__).resolve().parents[1]
 
 # --- placement -------------------------------------------------------------------
 
@@ -282,22 +291,6 @@ def test_a_deadline_is_retried_with_a_doubled_clock_inside_the_budget():
 # --- the driver: contract carried across rounds -----------------------------------
 
 
-class ScriptedDecomposerRunner:
-    name = "scripted-decomposer"
-
-    def __init__(self, answers: list[str]):
-        self.answers = list(answers)
-        self.calls = 0
-
-    def available(self):
-        return True
-
-    async def run_node(self, node):
-        text = self.answers[min(self.calls, len(self.answers) - 1)]
-        self.calls += 1
-        return NodeResult(status="qed", raw=text, trace={"final_text": text, "model": "scripted"})
-
-
 def test_the_contract_is_loaded_once_and_carried_through_every_round(tmp_path, monkeypatch):
     import pcp.orch.prove.design as design_mod
 
@@ -510,3 +503,179 @@ def test_a_twice_failed_node_is_reviewed_by_the_approver_before_its_budget_is_sp
     names = [d[0] for d in runner.dispatches]
     assert names.count("canary_swap") == 3 and swap.epoch == 1
     result.close()
+
+
+# --- the design budget, the frozen target and the report -----------------------------
+
+
+def test_design_rounds_are_bounded_across_resumes(tmp_path):
+    graph, root, dev = build_plain_graph(tmp_path, names=())
+    for rnd in (1, 2):
+        a = graph.start_attempt(root.id, runner="d", role="decomposer", round=rnd)
+        graph.finish_attempt(a, status="stuck", evidence="rejected")
+    assert design_rounds_used(graph, root) == 2
+    plan = '{"children": [{"name": "c1", "statement": "Lemma c1 : True."}]}'
+    runner = ScriptedDecomposerRunner([plan])
+    cfg = plain_cfg(tmp_path, decomposer_runner=runner, max_design_rounds=2, decomposer_seconds=5)
+    with pytest.raises(OrchestrationRequired, match="design budget is spent"):
+        asyncio.run(DesignDriver(cfg, graph, root, contract=DesignContract.everything_frozen()).initial(dev))
+    assert runner.calls == 0, "the budget is checked before the decomposer is spent"
+    cfg.max_design_rounds = 3
+    asyncio.run(DesignDriver(cfg, graph, root, contract=DesignContract.everything_frozen()).initial(dev))
+    rows = [r for r in graph.attempts_for(root.id) if r["role"] == "decomposer"]
+    assert runner.calls == 1 and rows[-1]["round"] == 3 and graph.by_name("c1") is not None
+    graph.close()
+
+
+def test_the_run_target_is_frozen_whatever_the_contract_says(tmp_path):
+    loose = DesignContract(results=frozenset({"helper"}), mutable_lemmas=True, allow_additions=True)
+    frozen = freeze_target(loose, "root")
+    assert frozen.results == {"helper", "root"} and freeze_target(frozen, "root") is frozen
+    assert freeze_target(object(), "root") is not None  # a contract without results is left alone
+    graph, root, dev = build_plain_graph(tmp_path, names=())
+    rewrite = json.dumps({
+        "definitions": [{"name": "root", "text": "Definition root : Prop."}],
+        "children": [{"name": "c", "statement": "Lemma c : True."}],
+    })
+    cfg = plain_cfg(
+        tmp_path, plan_source=None, decomposer_runner=ScriptedDecomposerRunner([rewrite]),
+        max_design_rounds=1, decomposer_seconds=5, contract=loose,
+    )
+    graph.close()
+    with pytest.raises(OrchestrationRequired) as exc:
+        asyncio.run(prove(cfg, MockRunner({})))
+    assert "root: changed" in str(exc.value) and "result to be proved" in str(exc.value)
+    graph = Graph(cfg.graph_path)
+    assert graph.get_meta("designed_file") is None
+    graph.close()
+
+
+def test_the_report_stays_one_screen_with_a_dozen_children_and_revisions(tmp_path):
+    names = [f"child_{i}" for i in range(12)]
+    plan = parse_proposal(json.dumps({"children": [{"name": n, "statement": f"Lemma {n} : True."} for n in names]}))
+    rejected = DecompositionResult(problems=[f"problem {i}" for i in range(8)], round=3)
+    report = RunReport(outcomes=[NodeOutcome(n, n, "stuck", evidence="x" * 300) for n in names] + [NodeOutcome("root", "root", "stuck", evidence="y")])
+    graph, root, dev = build_plain_graph(tmp_path, names=())
+    result = ProveResult(
+        report=report, sentinels=SentinelReport(), graph=graph, root=root,
+        decomposition=DecompositionResult(proposal=plan, model="m"),
+        design_rounds=[DecompositionResult(proposal=plan, model="m", round=2), rejected],
+        integration_detail="13 open", record_dir=tmp_path,
+    )
+    lines = result.render().splitlines()
+    assert len(lines) <= 24, "\n".join(lines)
+    assert lines[0] == "decomposer: m -- plan: 12 obligation(s)"
+    assert lines[1] == "design revision 2: plan: 12 obligation(s)"
+    assert lines[2].startswith("design revision 3: decomposition rejected:") and "(+5 more)" in lines[2]
+    assert max(len(x) for x in lines if not x.startswith(("records:", "solution:"))) <= 140
+    graph.close()
+
+
+def test_design_failure_after_running_is_a_result_not_a_usage_error() -> None:
+    assert issubclass(DesignFailed, OrchestrationRequired)
+    assert DesignFailed("x").exit_code == 1
+    assert OrchestrationRequired("x").exit_code == 2
+
+
+def test_standing_contested_and_exhausted_nodes_count_as_design_failures(tmp_path: Path) -> None:
+    """A resumed run whose single dispatched node proved still has the design's business
+    to finish when a contested child and an attempt-exhausted child sit in the graph."""
+    g = Graph(tmp_path / "g.db")
+    for name, status in (("root", "gated"), ("c_contested", "contested"), ("c_spent", "stuck"), ("c_live", "stuck")):
+        g.add_node(Node(id=node_id(name), name=name, statement=f"Lemma {name} : True.", statement_status="frozen",
+                        rank="root" if name == "root" else "local"))
+        if status != "open":
+            g.set_proof_status(node_id(name), "claimed")
+            if status == "gated":
+                g.record_proof(node_id(name), "exact I.")
+            else:
+                g.set_proof_status(node_id(name), status, evidence=f"{name} evidence")
+    for _ in range(2):
+        aid = g.start_attempt(node_id("c_spent"), runner="mock", owner="human")
+        g.finish_attempt(aid, status="stuck")
+    aid = g.start_attempt(node_id("c_live"), runner="mock", owner="human")
+    g.finish_attempt(aid, status="stuck")
+    report = RunReport(outcomes=[NodeOutcome(node_id=node_id("root"), name="root", status="qed")])
+    assert not design_failed(report)
+    standing = standing_failures(g, report, max_attempts=2)
+    assert sorted(o.name for o in standing.outcomes) == ["c_contested", "c_spent"]  # c_live still has an attempt
+    assert design_failed(RunReport.combined([report, standing]))
+    g.close()
+
+
+def test_the_glue_rationale_reaches_the_root_prover(tmp_path: Path) -> None:
+    """The decomposer's account of how the parent follows from the children becomes the
+    root's intent and reaches the root prover's packet."""
+    src = tmp_path / "D.v"
+    src.write_text("Lemma root : True.\nProof.\nAdmitted.\n", encoding="utf-8")
+    dev = Development(src)
+    graph = Graph(tmp_path / "g.db")
+    root = graph.add_node(Node(id=node_id("root"), name="root", statement="Lemma root : True.", statement_status="frozen", rank="root"))
+    proposal = parse_payload({
+        "children": [{"name": "c1", "statement": "Lemma c1 : 1 = 1."}],
+        "glue_rationale": "Deposit the atomic update at the load of the version; collect Q in the failure branch.",
+    })
+    cfg = ProveConfig(file=src, target="root", workroot=tmp_path / "work", contract=DesignContract.everything_frozen())
+    adopt_proposal(cfg, graph, dev, root, proposal)
+    root = graph.require(root.id)
+    assert root.intent.startswith("Deposit the atomic update")
+    paths = build_packet(graph, root, dev, siblings_of(graph, dev), anchor="root", root=tmp_path / "work", attempt_id=1)
+    task = paths.task.read_text(encoding="utf-8")
+    assert "## Why this lemma exists" in task and "Deposit the atomic update" in task
+    graph.close()
+
+
+# --- rwcas_design: contract, staging, sandbox ------------------------------------------
+
+
+@needs_rocq
+def test_rwcas_design_contract_import_and_frozen_result(tmp_path, bench_dir):
+    corpus = tmp_path / "rwcas_design"
+    shutil.copytree(bench_dir / "rwcas_design", corpus)
+    contract = freeze_target(DesignContract.from_corpus(corpus), "write_spec")
+    assert {"is_rwcas", "rwcasG", "value"} == set(contract.mutable) and "write_spec" in contract.results
+    dev = Development(corpus / "Rwcas.v")
+    graph = Graph(tmp_path / "g.db")
+    root = graph.add_node(Node(id=node_id("write_spec"), name="write_spec", statement=dev.require_block("write_spec").statement, rank="root", statement_status="frozen"))
+    cfg = ProveConfig(file=corpus / "Rwcas.v", target="write_spec", graph_path=tmp_path / "g.db", workroot=tmp_path / "w", run_lock=False)
+    design = parse_proposal(json.dumps({
+        "imports": ["From iris.base_logic.lib Require Import ghost_var."],
+        "definitions": [
+            {"name": "rwcasG", "text": "Class rwcasG Σ := {\n  rwcas_heapGS :: heapGS Σ;\n  rwcas_ghost_varG :: ghost_varG Σ Z;\n}."},
+            {"name": "value", "text": "Definition value (γ : gname) (n : Z) : iProp Σ := ghost_var γ (1/2) n."},
+            {"name": "rwcas_inv", "text": "Definition rwcas_inv (γ : gname) (l : loc) : iProp Σ := (∃ n : Z, l ↦ #n ∗ ghost_var γ (1/2) n)%I."},
+            {"name": "is_rwcas", "text": "Definition is_rwcas (γ : gname) (v : val) : iProp Σ := (∃ l : loc, ⌜v = #l⌝ ∗ inv rwcasN (rwcas_inv γ l))%I."},
+        ],
+        "children": [{"name": "rwcas_value_agree", "statement": "Lemma rwcas_value_agree (γ : gname) (n m : Z) : value γ n -∗ value γ m -∗ ⌜n = m⌝."}],
+    }))
+    designed = apply_design(cfg, graph, dev, root, design, contract=contract, round_no=1, workroot=tmp_path / "w")
+    text = designed.source
+    assert "ghost_var." in "\n".join(text.splitlines()[:5]) and text.index("Definition rwcas_inv") < text.index("Definition is_rwcas")
+    assert graph.get_meta("designed_file") == str(designed.path)
+    for name, bad_text in (("rwcasN", 'Definition rwcasN : namespace := N .@ "other".'), ("write_spec", "Definition write_spec : Prop.")):
+        bad = parse_proposal(json.dumps({"definitions": [{"name": name, "text": bad_text}], "children": [{"name": "c", "statement": "Lemma c : True."}]}))
+        with pytest.raises(DesignViolatesContract, match=f"{name}: changed"):
+            apply_design(cfg, graph, dev, root, bad, contract=contract, round_no=2, workroot=tmp_path / "w")
+    graph.close()
+
+
+def test_spec_only_staging_binds_only_the_staged_directory_into_the_sandbox(tmp_path, bench_dir):
+    corpus = tmp_path / "rwcas_design"
+    shutil.copytree(bench_dir / "rwcas_design", corpus)
+    cfg = ProveConfig(file=corpus / "Rwcas.v", target="write_spec", graph_path=tmp_path / "g.db", workroot=tmp_path / "w", brief="spec-only", run_lock=False)
+    staged = stage_spec_only(cfg, node_id("write_spec"), contract=DesignContract.from_corpus(corpus))
+    assert sorted(p.name for p in staged.path.parent.iterdir()) == ["Rwcas.v", "_CoqProject", "design.json"]
+    assert set(json.loads((staged.path.parent / "design.json").read_text())) == {"mutable", "results", "mutable_lemmas", "allow_additions", "allow_imports", "frozen_names"}
+    from pcp.orch.runners import sandbox as sb
+
+    if not sb.available():
+        pytest.skip("no bubblewrap")
+    box = sb.Sandbox.for_benchmark(ROOT, reference=tmp_path / "ref", corpus_dir=staged.path.parent, provider="anthropic", root=tmp_path / "stage")
+    box = dataclasses.replace(box, refresh_credentials=False, clearenv=True)
+    argv = box.wrap(["claude", "-p"], workdir=tmp_path / "w" / "n" / "a1", node_file_dir=staged.path.parent)
+    joined = " ".join(argv)
+    assert str(corpus) not in joined and str(bench_dir) not in joined and str(staged.path.parent) in joined
+    binds = [argv[i + 1] for i, a in enumerate(argv) if a in ("--ro-bind", "--bind")]
+    assert not [b for b in binds if (Path(b) / "DESIGN.md").exists() or Path(b).name == "DESIGN.md"]
+    masked = [argv[i + 1] for i, a in enumerate(argv) if a == "--tmpfs"]
+    assert str(ROOT / "eval") in masked and str(ROOT / ".pcp") in masked

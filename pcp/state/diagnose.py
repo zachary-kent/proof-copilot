@@ -7,12 +7,12 @@ rather than with a goal dump:
   the pattern does not fit the object.  The aligner walks both trees and names the
   first divergence.  The object must be the *right* one: for ``iDestruct (lem with
   "H") as ...`` it is the lemma's conclusion, which is not in the proof state, and the
-  report says so instead of aligning against ``H`` (legacy bug).
+  report says so instead of aligning against ``H``.
 * **Unification failures** -- ``iApply`` / ``wp_apply`` fail because the applied
   conclusion does not match the goal.  They get the conclusion-vs-goal report and
   *never* the leftover-spatial paragraph, which is for closing tactics (``iFrame``,
   ``done``, ``iExact``): telling an ``iApply`` to frame away the very resources the wand
-  needs was the legacy's wrong instruction.
+  needs would be the wrong instruction.
 
 The report is not opt-in: any failing ``proof_step`` gets it.
 """
@@ -249,8 +249,8 @@ def _intros_report(call: TacticCall, goal: IrisGoal) -> str:
 
     A ``%x`` (or a ``(x)`` binder) peels one quantified variable; anything else needs
     a wand or implication whose premise it destructs.  ``iIntros "%x H"`` on
-    ``∀ x, P -∗ Q`` therefore peels the ``∀`` first (legacy bug: it reported "nothing
-    left to introduce").
+    ``∀ x, P -∗ Q`` therefore peels the ``∀`` first rather than reporting "nothing
+    left to introduce".
     """
     node = parse_skeleton(goal.goal)
     for i, (kind, item) in enumerate(_intro_items(call), start=1):

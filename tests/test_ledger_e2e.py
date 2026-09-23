@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import _ipm_standin  # noqa: F401
 import pytest
 from conftest import needs_petanque
 

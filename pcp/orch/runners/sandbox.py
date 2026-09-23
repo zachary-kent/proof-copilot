@@ -7,11 +7,13 @@ with ``Bash`` can grep it out.  So this wraps a runner's command in ``bwrap`` wi
 **allowlist**, not a blocklist:
 
 * ``$HOME`` replaced by a tmpfs, with only the provider's credential files bound back;
-* the repo read-only with the answer-key subtrees masked;
+* the project read-only with the answer-key subtrees masked, and pcp's own install
+  (interpreter prefix, package, ``pcp`` entry point) read-only so ``pcp check`` runs
+  whether pcp is a checkout's venv or a ``uv tool`` install under ``$HOME``;
 * exactly one writable directory: the attempt's own workdir;
 * an explicit environment allowlist (``SANDBOX_PASSTHROUGH`` + ``HOME`` +
-  ``PCP_SANDBOX``): the legacy sandbox inherited the whole orchestrator environment,
-  API keys included (PLAN.md 11, "nothing secret may ever enter them").  Enforced
+  ``PCP_SANDBOX``): nothing else may enter a worker's environment, API keys included
+  (PLAN.md 11, "nothing secret may ever enter them").  Enforced
   twice: :meth:`Sandbox.environment` is what the ``bwrap`` process itself is started
   with (so nothing else exists to inherit, on any bubblewrap), and ``--clearenv`` +
   ``--setenv`` are emitted as well where the binary supports them (bubblewrap >= 0.5);
@@ -33,6 +35,7 @@ from __future__ import annotations
 import copy
 import os
 import shutil
+import sys
 import tempfile
 import threading
 from collections.abc import Mapping, Sequence
@@ -40,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pcp.config.env import SANDBOX, SANDBOX_PASSTHROUGH, bwrap_binary, with_runner_defaults
+from pcp.config.env import SANDBOX, SANDBOX_PASSTHROUGH, bwrap_binary, opam_root, with_runner_defaults
 from pcp.errors import ToolchainError
 from pcp.orch.protocol import NodePayload, NodeResult
 from pcp.util.hashing import content_hash, short_hash
@@ -50,12 +53,14 @@ from pcp.util.paths import tmpdir
 from pcp.util.proc import run
 
 __all__ = [
+    "CHECKOUT_MASKS",
     "CREDENTIAL_FILES",
     "SOLUTION_HOSTS",
     "Sandbox",
     "SandboxedRunner",
     "available",
     "bwrap_binary",
+    "install_paths",
     "stage_credentials",
     "sync_credentials",
 ]
@@ -83,6 +88,11 @@ SOLUTION_HOSTS: tuple[str, ...] = (
 )
 
 SYSTEM_PATHS: tuple[str, ...] = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt")
+
+#: Subtrees of a proof-copilot *checkout* that quote the benchmarks (for_benchmark's
+#: docstring).  A user's own project gets only ``.pcp`` masked: its docs/ and tests/
+#: are its own, not an answer key.
+CHECKOUT_MASKS: tuple[str, ...] = (".git", "eval", "docs", "tests")
 
 #: How often the credential stage is re-synced.  A worker can outlive several token
 #: refreshes (a design round is budgeted at 5400 s) and reads the stage live.
@@ -175,20 +185,26 @@ class Sandbox:
         binaries: Sequence[str] | None = None,
         home: Path | None = None,
         root: Path | None = None,
+        masks: Sequence[str | Path] = CHECKOUT_MASKS,
+        install: Sequence[Path] | None = None,
     ) -> Sandbox:
         """The configuration a held-out-lemma benchmark uses (contract 3.4).
 
-        The repo is bound read-only in full, and the repo is not innocent: ``eval/``
-        holds every *other* rung (for a design rung, the same development with the
-        design given), ``docs/`` quotes the benchmarks, ``tests/`` fixtures are real
-        examples, ``.git`` holds pre-scrub history and ``.pcp`` holds the answer key
-        and every earlier run.  All are masked; the corpus under test, the docs index
-        and any curated library are carved back out afterwards.
+        ``repo`` is the project root, bound read-only in full.  In a proof-copilot
+        checkout it is not innocent: ``eval/`` holds every *other* rung (for a design
+        rung, the same development with the design given), ``docs/`` quotes the
+        benchmarks, ``tests/`` fixtures are real examples, ``.git`` holds pre-scrub
+        history -- those are ``masks`` (default :data:`CHECKOUT_MASKS`; pass ``()`` for
+        a user's project).  ``.pcp`` holds the answer key and every earlier run and is
+        always masked; the corpus under test, the docs index and any curated library
+        are carved back out afterwards.  ``install`` (default :func:`install_paths`)
+        is pcp's own installation, bound read-only so ``pcp check`` exists inside.
         """
         repo = Path(repo).resolve()
         real_home = Path(home) if home is not None else user_home()
-        ro = [repo, Path(toolchain) if toolchain is not None else real_home / ".opam"]
-        masked = [repo / ".pcp", *(repo / sub for sub in (".git", "eval", "docs", "tests"))]
+        ro = [repo, Path(toolchain) if toolchain is not None else opam_root()]
+        ro += [Path(p) for p in (install if install is not None else install_paths())]
+        masked = list(dict.fromkeys([repo / ".pcp", *(repo / sub for sub in masks)]))
         if reference is not None:
             masked.append(Path(reference).resolve())
         unmasked = [Path(corpus_dir).resolve()] if corpus_dir is not None else []
@@ -223,6 +239,13 @@ class Sandbox:
         ``node_file_dir`` is the directory of the development the worker proves
         against: after a design is adopted it lives under the masked work root, and
         ``pcp check`` opens it eagerly, so only that directory is bound back.
+
+        Mount order is *most specific wins*: every mount is emitted shallowest target
+        first (:class:`_Mounts`), so a bind can never undo a mask beneath it -- a
+        carve-back of the project root (``pcp prove F.v`` with ``F.v`` at the root)
+        leaves ``.pcp`` and ``--reference`` hidden -- and a path is visible only if
+        the deepest rule on its ancestry is a bind.  At equal depth a mask beats a
+        bind of the same path.
         """
         bwrap = bwrap_binary()
         if bwrap is None:
@@ -232,53 +255,59 @@ class Sandbox:
         cmd: list[str] = [bwrap, "--die-with-parent", "--new-session", "--unshare-pid"]
         if not self.network:
             cmd.append("--unshare-net")
+        mounts = _Mounts()
         for system in SYSTEM_PATHS:
             if Path(system).exists():
-                cmd += ["--ro-bind", system, system]
+                mounts.bind(Path(system))
         if self.network and self.deny_hosts:
-            cmd += ["--ro-bind", str(hosts_file(self.deny_hosts, root)), "/etc/hosts"]
-        cmd += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run"]
+            mounts.add(Path("/etc/hosts"), _BIND, ["--ro-bind", str(hosts_file(self.deny_hosts, root)), "/etc/hosts"])
+        mounts.add(Path("/proc"), _BIND, ["--proc", "/proc"])
+        mounts.add(Path("/dev"), _BIND, ["--dev", "/dev"])
+        mounts.mask(Path("/tmp"))
+        mounts.mask(Path("/run"))
         if self.network:
             # ``/etc/resolv.conf`` is usually a symlink into ``/run``, which the tmpfs
             # just replaced; bind the *resolved* file back or DNS dies silently.
             resolv = Path("/etc/resolv.conf")
             if resolv.exists():
                 real = resolv.resolve()
-                cmd += ["--ro-bind", str(real), str(real) if real != resolv else "/etc/resolv.conf"]
-        cmd += ["--tmpfs", str(home)]
+                target = real if real != resolv else resolv
+                mounts.add(target, _BIND, ["--ro-bind", str(real), str(target)])
+        mounts.mask(home)
         for path in self.ro_paths:
             resolved = Path(path).resolve()
             if resolved.exists():
-                cmd += ["--ro-bind", str(resolved), str(resolved)]
-        # Masks come after the binds so a read-only repo can have subtrees blanked.  A
-        # mask that does not exist is skipped: nothing there can leak, and bwrap
-        # cannot create a mount point inside a read-only bind (legacy bug 18).
+                mounts.bind(resolved)
+        # A mask that does not exist is skipped: nothing there can leak, and bwrap
+        # cannot create a mount point inside a read-only bind.
         for path in self.masked:
             resolved = Path(path).resolve()
             if resolved.exists():
-                cmd += ["--tmpfs", str(resolved)]
+                mounts.mask(resolved)
         # Credentials: a *directory* stage is bound, never the files.  ``--ro-bind
         # <file>`` pins an inode, and an OAuth refresh replaces the file by rename --
         # every worker spawned before the rotation kept the revoked token.
         for host_dir, stage_dir in stage_credentials(self.credentials, home, root=root, refresh=self.refresh_credentials):
-            cmd += ["--ro-bind", str(stage_dir), str(host_dir)]
+            mounts.add(host_dir, _BIND, ["--ro-bind", str(stage_dir), str(host_dir)])
         for rel in self.credentials:
             src = home / rel
             if src.exists() and src.parent == home:
                 # Directly in ``$HOME`` (the tmpfs): config, not the rotating token.
-                cmd += ["--ro-bind", str(src), str(src)]
+                mounts.bind(src)
         for binary in self.binaries:
             for path in _binary_dirs(binary):
-                cmd += ["--ro-bind", str(path), str(path)]
+                mounts.bind(path)
         extra = [*self.docs_paths, *self.unmasked]
         if node_file_dir is not None:
             extra.append(Path(node_file_dir))
         for path in extra:
             resolved = Path(path).resolve()
             if resolved.exists():
-                cmd += ["--ro-bind", str(resolved), str(resolved)]
+                mounts.add(resolved, _CARVE, ["--ro-bind", str(resolved), str(resolved)])
         work = Path(workdir).resolve()
-        cmd += ["--bind", str(work), str(work), "--chdir", str(work)]
+        mounts.add(work, _CARVE, ["--bind", str(work), str(work)])
+        cmd += mounts.ordered()
+        cmd += ["--chdir", str(work)]
         # The allowlist: ``--clearenv`` first (where known), then only what is named.
         clearenv = self.clearenv if self.clearenv is not None else supports_clearenv(bwrap)
         if clearenv:
@@ -288,6 +317,40 @@ class Sandbox:
         cmd.append("--")
         cmd += [str(a) for a in argv]
         return cmd
+
+
+# ---------------------------------------------------------------- mount ordering
+
+#: Ranks among mounts of the *same* target: a mask is applied last, so it wins.
+_BIND, _CARVE, _MASK = 0, 1, 2
+
+
+class _Mounts:
+    """bwrap mounts, emitted so the most specific rule on every path wins.
+
+    bwrap applies mounts in argv order and a later mount on an ancestor covers
+    everything beneath it, so a carve-back emitted after a mask it contains undid the
+    mask (the project root bound back over its own ``.pcp``).  Sorting by target depth
+    (stable, then by rank) makes the order irrelevant to the caller: an ancestor is
+    always mounted before its descendants, whatever kind either is.
+    """
+
+    def __init__(self) -> None:
+        self._mounts: list[tuple[int, int, int, list[str]]] = []
+
+    def add(self, target: Path, rank: int, args: list[str]) -> None:
+        self._mounts.append((len(Path(target).parts), rank, len(self._mounts), args))
+
+    def bind(self, path: Path) -> None:
+        self.add(path, _BIND, ["--ro-bind", str(path), str(path)])
+
+    def mask(self, path: Path) -> None:
+        # A tmpfs cannot be mounted on a file; an empty file blanks it instead.
+        args = ["--tmpfs", str(path)] if path.is_dir() or not path.exists() else ["--ro-bind", "/dev/null", str(path)]
+        self.add(path, _MASK, args)
+
+    def ordered(self) -> list[str]:
+        return [a for *_key, args in sorted(self._mounts, key=lambda m: m[:3]) for a in args]
 
 
 # ---------------------------------------------------------------- host-side staging
@@ -420,6 +483,25 @@ class _suppress_oserror:
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         return exc_type is not None and issubclass(exc_type, OSError)
+
+
+def install_paths() -> list[Path]:
+    """What running pcp needs from the host, besides the system and the toolchain:
+    the interpreter's prefix and base prefix (a ``uv tool`` venv under
+    ``~/.local/share/uv/tools`` and its managed Python under ``~/.local/share/uv/python``
+    -- both inside the ``$HOME`` the sandbox replaces) and the package directory itself
+    (an editable install's source).  The ``pcp`` entry point's directories are bound
+    through ``binaries``."""
+    import pcp
+
+    home = user_home().resolve()
+    out: list[Path] = []
+    for raw in (sys.prefix, sys.base_prefix, Path(pcp.__file__).parent):
+        path = Path(raw).resolve()
+        # Never ``$HOME`` or an ancestor of it: that bind would undo the home tmpfs.
+        if path.exists() and path not in out and path != home and path not in home.parents:
+            out.append(path)
+    return out
 
 
 def _binary_dirs(name: str) -> list[Path]:

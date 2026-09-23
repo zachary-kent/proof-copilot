@@ -151,8 +151,8 @@ def test_render_library_lists_readme_note_and_files(tmp_path):
 
 
 def test_the_packet_tells_workers_to_run_checks_in_the_foreground(tmp_path) -> None:
-    """A headless worker ran `pcp check` in the background and ended its turn to wait for
-    it, which ended the session (spec-only seqlock_wf resume, 2026-09-05)."""
+    """A headless worker that runs `pcp check` in the background and ends its turn to wait
+    for it ends its session, so the packet says to run checks in the foreground."""
     from pcp.orch.model import Node, node_id
     from pcp.orch.packet import render_task
     from pcp.rocq.assemble import Development

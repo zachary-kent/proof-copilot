@@ -7,9 +7,9 @@ bodies with ``Admitted``, and ask an agent to reprove them.
 
 Every task is **one ordinary ``pcp prove`` run** (:func:`pcp.orch.prove.run` with
 ``require_orchestration=False`` and a single attempt), so the harness measures the
-same packet, the same gate and the same records as the daily loop -- the legacy
-harness hand-rolled its own packet and ``pcp-node.json`` and so ran a *different*
-arm under the same name as ``pcp prove --state-tools`` (bugs-dash-eval: harness.py:209).
+same packet, the same gate and the same records as the daily loop; a hand-rolled
+packet or ``pcp-node.json`` could otherwise run a *different* arm under the same
+name as ``pcp prove --state-tools``.
 
 What the structure makes impossible, rather than fixes:
 
@@ -79,7 +79,6 @@ from pcp.util.io import (  # noqa: E402
     rm_tree,
     slug,
 )
-from pcp.util.paths import repo_root  # noqa: E402
 from pcp.util.text import indent  # noqa: E402
 
 BENCH_FILE = "bench.json"
@@ -88,6 +87,9 @@ REFERENCE_FILE = "reference.json"
 MAX_BODY_CHARS = 4000
 DEFAULT_FILES = "iris/heap_lang/lib/*.v"
 DEFAULT_RECORD = Path(".pcp/records")
+#: The checkout this harness lives in -- the harness is checkout-only by nature (it
+#: masks the checkout's own eval/, docs/, tests/ and .git from sandboxed workers).
+REPO = Path(__file__).resolve().parents[1]
 DEFAULT_WORKROOT = Path(".pcp/eval")
 DEFAULT_OUT = Path(".pcp/eval/results.json")
 INDEX_PATH = Path(".pcp/docs/index.txt")
@@ -144,7 +146,7 @@ def collect_benchmark(corpus: Path, reference: Path | None = None) -> list[Task]
 
     The held-out names come from the corpus's own ``bench.json`` and must resolve to
     ``Admitted`` blocks of the corpus file; a name that does not is *reported*, not
-    silently dropped (the legacy harness shrank ``n`` without a word).  Reference
+    silently dropped, so ``n`` never shrinks without a word.  Reference
     bodies come from the answer key, which lives elsewhere and is never bound into a
     worker sandbox; scoring is by the gate, not by diffing against it.
     """
@@ -361,7 +363,7 @@ def benchmark_sandbox(runner_name: str, *, reference: Path | None, corpus_dir: P
     if not sb.available():
         raise UsageError("--sandbox needs bubblewrap (`bwrap`); install it or drop --sandbox")
     return sb.Sandbox.for_benchmark(
-        repo_root(), reference=reference, corpus_dir=corpus_dir, library=[], provider=provider_for(runner_name),
+        REPO, reference=reference, corpus_dir=corpus_dir, library=[], provider=provider_for(runner_name),
     )
 
 

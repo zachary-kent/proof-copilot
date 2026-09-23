@@ -92,7 +92,7 @@ class ProveConfig:
     graph_path: Path = Path(".pcp/graph.db")
     workroot: Path = Path(".pcp/work")
     concurrency: int | None = None
-    #: The per-attempt wall clock.  Always the worker's deadline (bugs-pipeline B1).
+    #: The per-attempt wall clock.  Always the worker's deadline.
     node_seconds: float = 900.0
     #: Attempts per node *per statement epoch*, counted across runs.
     max_attempts: int = 2

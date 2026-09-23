@@ -1,9 +1,9 @@
 """A bounded pool of ``pet`` processes with **pinned** sessions (PLAN.md 6; ARCHITECTURE.md 6).
 
 A pet with Iris loaded costs 1-2 GB and executes tactics serially, so there are a
-handful of processes and many logical sessions over them.  v1 let a session borrow
-*any* free process per call; petanque ids are per process, so that silently ran
-tactics against another lemma's state.  Here a session is bound at ``open`` to the
+handful of processes and many logical sessions over them.  Petanque ids are per
+process, so a session that borrowed *any* free process per call would silently run
+tactics against another lemma's state.  Instead a session is bound at ``open`` to the
 process that elaborates its file (file affinity: coq-lsp caches the checked document,
 22 s -> 0.3 s) and every later call goes to that process -- never to another one.
 
@@ -162,10 +162,6 @@ class SessionPool:
             refs = self._sessions.setdefault(session.process.id, [])
             refs[:] = [r for r in refs if r() is not None]
             refs.append(weakref.ref(session))
-
-    def sessions_of(self, process: PetProcess) -> list[ProofSession]:
-        with self._lock:
-            return [s for r in self._sessions.get(process.id, []) if (s := r()) is not None]
 
     # -- lifecycle -------------------------------------------------------------
     def close(self) -> None:

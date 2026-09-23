@@ -1,9 +1,8 @@
 """Incremental invariant amendments: the one-conjunct route back to the design.
 
 Provers discover mid-proof that the invariant lacks a fact or a modality guard --
-the registry entry stored ``Q`` where the close site needs ``▷ Q`` (seqlock_wf,
-2026-09-04).  Before this module the only route back was ``contested``/``stuck`` -> a
-**full** design revision at design effort (30-45 minutes, a replay of everything,
+the registry entry stored ``Q`` where the close site needs ``▷ Q``.  Without this
+module the only route back is ``contested``/``stuck`` -> a **full** design revision at design effort (30-45 minutes, a replay of everything,
 a re-dispatch of everything).  That is the right shape for "the invariant is wrong"
 and the wrong shape for "add one conjunct".  The human's workflow is incremental --
 add the fact, re-check what broke, continue -- and this is that workflow, with the
@@ -14,8 +13,8 @@ lattice of PLAN.md 8.5 deciding who gets to say yes:
   machine-checked -- it compiles against the contract or it does not.  Its *direction*
   is not: a definition the goal *assumes* gets weaker as a theorem when its
   hypothesis gets stronger, and ``add = False`` on ``is_lock`` proves every
-  specification that assumes ``is_lock`` (review finding, real Rocq: a false
-  ``amend_inv n -∗ ⌜n = 42⌝`` integrated with a clean ``Print Assumptions``).  So an
+  specification that assumes ``is_lock`` (checked in Rocq: a false
+  ``amend_inv n -∗ ⌜n = 42⌝`` integrates with a clean ``Print Assumptions``).  So an
   ``add`` is put to the **approver** whenever one is configured -- accept is the
   expected answer and the round is short -- and auto-accepted, marked *unreviewed*
   in the report, only in a run with no approver at all, where the human reading the
@@ -53,7 +52,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -203,7 +202,7 @@ def strengthened_definition(block_text: str, add: str) -> str:
     ``add = "True) ∨ (False"`` compiles to ``(body) ∗ (True) ∨ (False)`` -- ``∨``
     binds looser than ``∗``, so that is ``(body ∗ True) ∨ False``, not a
     strengthening -- and ``add = "True) -∗ (⌜n = 7⌝"`` to a definition that is
-    *weaker* than the old one (review finding, checked with ``coqc``).  Every such
+    *weaker* than the old one (checked with ``coqc``).  Every such
     escape is refused here, before anything is compiled.
     """
     code = strip_comments(block_text).strip()
@@ -545,7 +544,7 @@ def _replay_and_reopen(
         tainted.append(requester)
     # `statement_invalidated` leaves the root to the replay; a root that is not proved
     # but failed *against the old meaning* of a definition its statement names is in
-    # the same position as any child (review finding: a contested root stayed contested).
+    # the same position as any child, so a contested root reopens too.
     root_now = graph.require(root.id)
     if (
         root_now.proof_status in ("stuck", "contested") and root_now.name not in seen
@@ -564,8 +563,8 @@ def _replay_and_reopen(
             reopened.append(node_name)
     # A node an earlier amendment in this pass already reopened is `open` now, and so
     # may be the requester of this one: it is told about this change too, so what its
-    # packet says is true of the file it gets (review finding: a `replace` reopened the
-    # requester of an `add`, and the requester was never told its conjunct landed).
+    # packet says is true of the file it gets (the requester of an `add` reopened by a
+    # `replace` is still told its conjunct landed).
     seen = set(reopened)
     for node in graph.nodes():
         if node.proof_status != "open" or node.name in seen:
@@ -640,9 +639,8 @@ class AmendmentRun:
 
         ``replace`` requests go first, then ``add``s, each kind in request order: a
         conjunct joins whatever the definition says *after* any restatement in the same
-        pass, where the other order applied the conjunct, told its requester the
-        definition "now also carries" it, and then let the restatement drop it
-        (review finding).
+        pass; the other order would apply the conjunct, tell its requester the
+        definition "now also carries" it, and then let the restatement drop it.
         """
         changed = False
         ordered = sorted(requests, key=lambda r: r.kind != "replace")  # stable: replaces first
@@ -762,7 +760,7 @@ class AmendmentRun:
             live = graph.require(node.id)
             if live.proof_status == "open":
                 # The fix reopened it: that retry is the move.  (Contesting an open node is
-                # not a lattice move -- review finding.)
+                # not a lattice move.)
                 if node.name not in reopened:
                     reopened.append(node.name)
                 _mark_adjudicated(*marks)
@@ -909,7 +907,7 @@ class AmendmentRun:
         the answer is "no" -- refused by a check, rejected by the approver, capped --
         that retry must still happen in this run, with the refusal as its evidence
         (``_tell_requester`` wrote it), rather than be lost (a plan run) or bought with
-        a full design revision (review finding: a refused ``add`` cost one).  Bounded
+        a full design revision.  Bounded
         by the node's attempt budget like any retry; a node already reopened by an
         applied amendment's salvage is left alone.
         """
@@ -993,7 +991,3 @@ def parked_for_review(graph: Graph, cfg: Any) -> list[Node]:
         and attempts_spent(graph, n) >= threshold
         and graph.get_meta(f"{ADJUDICATED_META}:{n.id}") != str(n.epoch)
     ]
-
-
-def render_amendments(outcomes: Sequence[AmendmentOutcome]) -> list[str]:
-    return [o.render() for o in outcomes]

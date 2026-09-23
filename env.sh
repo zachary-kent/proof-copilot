@@ -1,19 +1,20 @@
-# proof-copilot toolchain pins (Phase 0).
+# proof-copilot developer shell (a checkout only; an installed pcp needs none of this).
 #
-# Source this to get `rocq`, `coqc`, `pet-server` and the Iris libraries on PATH:
 #     . ./env.sh
 #
-# To build the switch from scratch: ./scripts/setup-toolchain.sh
+# Activates the pinned opam switch and this checkout's .venv.  The pins themselves live
+# in pcp/assets/toolchain.env (shipped with the package, read by `pcp setup`/`pcp doctor`);
+# this file only reads them.  Build the switch with `pcp setup` (or `make toolchain`).
+# Installed users: `eval "$(pcp env)"` does the switch part, and is optional.
 
-# --- pinned versions -------------------------------------------------------
-export PCP_OPAM_SWITCH="${PCP_OPAM_SWITCH:-pcp}"
-export PCP_OCAML_VERSION="5.2.1"
-export PCP_ROCQ_VERSION="9.1.1"
-export PCP_ROCQ_STDLIB_VERSION="9.1.0"
-export PCP_COQLSP_VERSION="0.2.5+9.1"
-export PCP_STDPP_VERSION="1.13.0"
-export PCP_IRIS_VERSION="4.5.0"
-export PCP_EQUATIONS_VERSION="1.3.1+9.1"
+_pcp_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
+# --- pinned versions (exported for scripts that want them) -----------------
+set -a
+# shellcheck disable=SC1091
+. "$_pcp_here/pcp/assets/toolchain.env"
+set +a
+export PCP_OPAM_SWITCH="${PCP_OPAM_SWITCH:-$PCP_DEFAULT_OPAM_SWITCH}"
 
 # Python: 3.11+ required (pcp uses `X | Y` annotations and tomllib).
 export PCP_PYTHON="${PCP_PYTHON:-python3.11}"
@@ -26,7 +27,8 @@ if command -v opam >/dev/null 2>&1; then
 fi
 
 # The project's own venv, if it has been created.
-if [ -d "$(dirname "${BASH_SOURCE[0]:-$0}")/.venv" ]; then
+if [ -d "$_pcp_here/.venv" ]; then
   # shellcheck disable=SC1091
-  . "$(dirname "${BASH_SOURCE[0]:-$0}")/.venv/bin/activate"
+  . "$_pcp_here/.venv/bin/activate"
 fi
+unset _pcp_here

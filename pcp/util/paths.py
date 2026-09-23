@@ -1,18 +1,14 @@
-"""Where things are.  Library code takes absolute paths; the CLI resolves them here."""
+"""Where things are.  Library code takes absolute paths; the CLI resolves them here.
+
+There is deliberately no "repo root": an installed package has none.  Packaged files
+come from :mod:`pcp.util.assets`; the project a command runs on is the invocation
+directory.
+"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-
-
-def repo_root() -> Path:
-    """The checkout this package was imported from (for ``coq/IDump.v``, ``skills/``).
-
-    For an installed (non-editable) package this is the site-packages parent and the
-    repo-only assets are absent; callers check for existence.
-    """
-    return Path(__file__).resolve().parents[2]
 
 
 def resolve_from(path: str | Path, base: str | Path | None = None) -> Path:

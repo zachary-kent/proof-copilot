@@ -34,11 +34,3 @@ def prop_hash(prop: str, *, prefix: str = "h") -> str:
     render layer shortens it for display only.
     """
     return content_hash(normalize_prop(prop), prefix=prefix + ":")
-
-
-def evar_names(prop: str) -> list[str]:
-    return [m.group(1) for m in _EVAR.finditer(prop)]
-
-
-def mentions_evar(prop: str) -> bool:
-    return bool(_EVAR.search(prop))

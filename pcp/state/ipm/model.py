@@ -2,7 +2,7 @@
 
 Everything else in ``pcp.state`` is a view over these types.  They are JSON-shaped and
 versioned: a trace is a durable artifact (the eval corpus, the regression suite, later
-training data), and the on-disk shape (``schema v=1``) is unchanged from v1.
+training data), and the on-disk shape is ``schema v=1``.
 """
 
 from __future__ import annotations

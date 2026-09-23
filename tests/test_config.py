@@ -27,7 +27,7 @@ def test_example_config_loads_and_every_key_is_read(tmp_path: Path) -> None:
     assert cfg.effort["decomposer"] == "xhigh"
     assert cfg.concurrency == 3
     assert cfg.axiom_whitelist == ["Foo.bar"]
-    assert cfg.flags["strict_no_gap"] is False
+    assert cfg.flags["recursive_decomposition"] is False
     assert cfg.providers["local"].endpoint == "http://localhost:11434"
     assert cfg.source == str(p)
 
@@ -51,6 +51,15 @@ def test_unknown_flag_is_refused(tmp_path: Path) -> None:
     p.write_text("[flags]\nwarp_drive = true\n", encoding="utf-8")
     with pytest.raises(UsageError, match="unknown flag"):
         load(p)
+
+
+def test_retired_flag_warns_once_and_is_ignored_not_refused(tmp_path: Path) -> None:
+    p = tmp_path / "config.toml"
+    p.write_text("[flags]\nvacuity_probes = true\nrecursive_decomposition = true\n", encoding="utf-8")
+    with pytest.warns(UserWarning, match="vacuity_probes"):
+        cfg = load(p)
+    assert "vacuity_probes" not in cfg.flags
+    assert cfg.flags["recursive_decomposition"] is True
 
 
 def test_resolve_honours_provider_preference_order() -> None:
@@ -102,3 +111,57 @@ def test_pet_mem_limit_default(monkeypatch) -> None:
     assert penv.pet_mem_limit_mb() == penv.DEFAULT_PET_MEM_LIMIT_MB
     monkeypatch.setenv(penv.PET_MEM_LIMIT_MB, "1024")
     assert penv.pet_mem_limit_mb() == 1024
+
+
+# ---------------------------------------------------------------- the pinned switch
+
+
+def _fake_switch(root: Path, name: str = "pcp", binaries: tuple[str, ...] = ("coqc", "pet")) -> Path:
+    prefix = root / name
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "lib" / "coq" / "user-contrib" / "iris").mkdir(parents=True)
+    for b in binaries:
+        exe = prefix / "bin" / b
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+    return prefix
+
+
+def test_the_switch_defaults_to_the_pinned_name_and_follows_opamroot(tmp_path: Path, monkeypatch) -> None:
+    from pcp.util.assets import toolchain_pins
+
+    monkeypatch.delenv("PCP_OPAM_SWITCH", raising=False)
+    monkeypatch.setenv("OPAMROOT", str(tmp_path))
+    assert penv.opam_switch() == toolchain_pins()["PCP_DEFAULT_OPAM_SWITCH"] == "pcp"
+    assert penv.switch_prefix() is None
+    prefix = _fake_switch(tmp_path, "other")
+    monkeypatch.setenv("PCP_OPAM_SWITCH", "other")
+    assert penv.switch_prefix() == prefix and penv.switch_user_contrib() == prefix / "lib" / "coq" / "user-contrib"
+    assert penv.switch_prefix("pcp") is None
+
+
+def test_binaries_fall_back_to_the_switch_after_path(tmp_path: Path, monkeypatch) -> None:
+    """Claude Code / Codex start pcp without a login shell: no `opam env`, no eval."""
+    for var in (penv.COQC, penv.PET, penv.PET_SERVER, "PCP_OPAM_SWITCH", penv.ROCQPATH, penv.COQPATH):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setenv("OPAMROOT", str(tmp_path))
+    assert penv.coqc_binary() is None
+    prefix = _fake_switch(tmp_path)
+    assert penv.coqc_binary() == str(prefix / "bin" / "coqc")
+    assert penv.pet_binary() == str(prefix / "bin" / "pet") and penv.pet_server_binary() is None
+    assert penv.library_roots() == [prefix / "lib" / "coq" / "user-contrib"]
+    assert penv.iris_root() == prefix / "lib" / "coq" / "user-contrib"
+    onpath = tmp_path / "mine"
+    onpath.mkdir()
+    (onpath / "coqc").write_text("#!/bin/sh\n")
+    (onpath / "coqc").chmod(0o755)
+    monkeypatch.setenv("PATH", str(onpath))
+    assert penv.coqc_binary() == str(onpath / "coqc"), "the operator's PATH wins"
+
+
+def test_a_local_switch_is_found_by_its_directory(tmp_path: Path, monkeypatch) -> None:
+    local = tmp_path / "proj"
+    _fake_switch(local, "_opam")
+    monkeypatch.setenv("PCP_OPAM_SWITCH", str(local))
+    assert penv.switch_prefix() == local / "_opam"

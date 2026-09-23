@@ -22,8 +22,8 @@ def coq_project_flags(root: Path) -> list[str]:
     """Load-path flags from ``root/_CoqProject`` (file lists are ignored).
 
     Lines are split like the shell does, so ``-arg "-w -deprecated"`` is two flags
-    and a ``#`` comment is not honoured (review finding: a whitespace split handed
-    coqc a literal ``"-w``).
+    and a ``#`` comment is not honoured; a plain whitespace split would hand coqc a
+    literal ``"-w``.
     """
     path = Path(root) / "_CoqProject"
     if not path.exists():
@@ -85,7 +85,6 @@ class ErrorLocation:
     file: str
     line: int
     char_start: int
-    char_end: int
 
 
 @dataclass
@@ -121,9 +120,9 @@ class CompileResult:
         for m in _LOCATION.finditer(text):
             after = text[m.end() : m.end() + 400]
             if re.match(r"\s*Error", after):
-                return ErrorLocation(m.group("file"), int(m.group("line")), int(m.group("a")), int(m.group("b")))
+                return ErrorLocation(m.group("file"), int(m.group("line")), int(m.group("a")))
             if best is None and not re.match(r"\s*Warning", after):
-                best = ErrorLocation(m.group("file"), int(m.group("line")), int(m.group("a")), int(m.group("b")))
+                best = ErrorLocation(m.group("file"), int(m.group("line")), int(m.group("a")))
         return best
 
 
@@ -145,7 +144,7 @@ def compile_text(
     """
     coqc = penv.coqc_binary()
     if coqc is None:
-        return CompileResult(False, unavailable="no coqc on PATH -- run ./scripts/setup-toolchain.sh and `. ./env.sh`")
+        return CompileResult(False, unavailable="no coqc on PATH or in the pinned switch -- run `pcp setup` (see `pcp doctor`)")
     base = Path(scratch_root) if scratch_root is not None else None
     if base is not None:
         base.mkdir(parents=True, exist_ok=True)
@@ -154,7 +153,7 @@ def compile_text(
         target = work / filename
         target.write_text(text, encoding="utf-8")
         # The Rocq 9 front end is ``rocq compile``; handing it coqc's flags directly
-        # fails with "Unknown subcommand" (review finding).
+        # fails with "Unknown subcommand".
         front = [coqc, "compile"] if Path(coqc).name == "rocq" else [coqc]
         argv = [*front, *rebase_flags(list(flags or coq_project_flags(root)), root, work), "-w", "-notation-overridden", target.name]
         done = run(argv, cwd=work, timeout=timeout)

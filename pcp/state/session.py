@@ -46,7 +46,7 @@ class StepResult:
     elapsed_ms: int = 0
     proof_finished: bool = False
     #: Step number (0 = root) at which this exact state was already seen; set for
-    #: committed *and* speculative runs (v1 dropped it on the committed path).
+    #: committed *and* speculative runs.
     loop_of: int | None = None
     timed_out: bool = False
     #: The ``Set Typeclasses Debug`` trace of the re-run, when the step timed out.

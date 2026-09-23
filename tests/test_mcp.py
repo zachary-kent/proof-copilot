@@ -18,7 +18,8 @@ from types import SimpleNamespace
 import pytest
 from conftest import SCRATCH, needs_petanque, needs_rocq, petanque_available
 
-from pcp.errors import StateError, ToolchainError
+from pcp import __version__
+from pcp.errors import StateError, ToolchainError, UsageError
 from pcp.mcp.names import MAX_TOOLS, TOOLS, mcp_tool_name
 from pcp.mcp.server import (
     LOST_ACTION,
@@ -57,6 +58,25 @@ def test_the_tool_surface_is_exactly_ten_and_namespaced(tmp_path: Path) -> None:
     assert tuple(fns) == TOOLS
     assert all(fn.__doc__ for fn in fns.values()), "every served tool needs a description"
     assert [mcp_tool_name(t) for t in TOOLS] == [f"mcp__pcp__{t}" for t in TOOLS]
+
+
+def test_pcp_server_refuses_a_workspace_that_does_not_exist(tmp_path: Path) -> None:
+    missing = tmp_path / "nope"
+    with pytest.raises(UsageError, match="nope"):
+        PcpServer(missing)
+
+
+def test_pcp_server_names_an_unexpanded_placeholder(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(UsageError, match=r"\$\{CLAUDE_PROJECT_DIR\}") as exc_info:
+        PcpServer("${CLAUDE_PROJECT_DIR}")
+    assert "unexpanded" in str(exc_info.value)
+
+
+@pytest.mark.skipif(not _has_mcp(), reason="no mcp SDK installed")
+def test_make_mcp_sets_serverinfo_version_to_pcps_own(tmp_path: Path) -> None:
+    mcp = make_mcp("probe")
+    assert getattr(mcp, "version", None) == __version__
 
 
 @pytest.mark.skipif(not _has_mcp(), reason="no mcp SDK installed")
@@ -190,6 +210,83 @@ def test_pcp_mcp_hands_run_stdio_an_absolute_workspace(monkeypatch, tmp_path: Pa
     assert seen == [tmp_path.resolve()]
 
 
+# The same bad calls, registered on the installed SDK and sent through its own client:
+# every call travels the real JSON-RPC path over in-memory streams -- schema
+# generation, argument validation, result framing -- so what the model's harness sees
+# is what is asserted.
+SDK_BAD_INPUT = {
+    "proof_open": {"file": "nope.v", "lemma": "x"},
+    "proof_trace": {"file": "nope.v", "lemma": "x"},
+    "verify_node": {"file": "nope.v", "lemma": "x", "body": "idtac."},
+    "proof_step": {"session": "s9", "tactic": "idtac."},
+    "proof_state": {"session": "s9"},
+    "proof_ledger": {"session": "s9", "query": "events"},
+    "proof_try": {"session": "s9", "tactics": ["idtac."]},
+    "proof_destruct": {"session": "s9", "hyp": "H", "spec": {"names": ["a"]}},
+    "premise_search": {"session": "s9"},
+    "notation_resolve": {"session": "s9", "token": "+"},
+}
+
+
+def _sdk_v2() -> bool:
+    return _has_mcp() and hasattr(make_mcp("probe"), "_lowlevel_server")
+
+
+@pytest.mark.skipif(not _sdk_v2(), reason="needs the mcp 2.x SDK (in-process lowlevel server)")
+def test_the_server_survives_every_bad_call_through_the_sdk_client(tmp_path: Path, monkeypatch) -> None:
+    import anyio
+    from mcp.client.session import ClientSession
+    from mcp.shared.memory import create_client_server_memory_streams
+
+    seen: dict[str, object] = {}
+
+    async def scenario() -> None:
+        server, mcp = build_server(tmp_path)
+        low = mcp._lowlevel_server
+        try:
+            async with (
+                create_client_server_memory_streams() as (client_streams, server_streams),
+                anyio.create_task_group() as tg,
+            ):
+                tg.start_soon(low.run, server_streams[0], server_streams[1], low.create_initialization_options())
+                async with ClientSession(client_streams[0], client_streams[1]) as session:
+                    await session.initialize()
+                    listed = await session.list_tools()
+                    seen["names"] = [t.name for t in listed.tools]
+                    seen["schemas"] = {t.name: sorted((t.input_schema or {}).get("properties", {})) for t in listed.tools}
+
+                    async def call(name: str, args: dict) -> tuple[bool, str]:
+                        res = await session.call_tool(name, args)
+                        return bool(res.is_error), (res.content[0].text if res.content else "")
+
+                    seen["bad_input"] = {name: await call(name, args) for name, args in SDK_BAD_INPUT.items()}
+                    # A fault *inside* a guarded tool is a JSON error object, not a protocol error.
+                    monkeypatch.setattr(PcpServer, "_pool_for", lambda self, *, reflect: (_ for _ in ()).throw(RuntimeError("kaboom")))
+                    (tmp_path / "x.v").write_text("Lemma x : True.\nProof. exact I. Qed.\n", encoding="utf-8")
+                    seen["raise"] = await call("proof_open", {"file": "x.v", "lemma": "x"})
+                    seen["after"] = await call("proof_state", {"session": "s9"})
+                    seen["bad_types"] = await call("proof_step", {"session": 12, "tactic": ["a"]})
+                    seen["missing"] = await call("proof_step", {"tactic": "x"})
+                    seen["unknown"] = await call("nonexistent", {})
+                    seen["still_alive"] = await call("proof_ledger", {"session": "s9", "query": "events"})
+                tg.cancel_scope.cancel()
+        finally:
+            server.close()
+
+    anyio.run(scenario)
+    assert seen["names"] == list(TOOLS)
+    assert seen["schemas"]["proof_destruct"] == ["apply", "hyp", "session", "spec"]
+    assert seen["schemas"]["proof_state"] == ["budget", "diff_only", "mode", "relevance", "select", "session", "step"]
+    for name, (is_error, text) in seen["bad_input"].items():
+        assert not is_error, name
+        assert "error" in json.loads(text), name
+    is_error, text = seen["raise"]
+    assert not is_error and json.loads(text) == {"error": "RuntimeError: kaboom"}
+    assert json.loads(seen["after"][1]) == {"error": "no session 's9'; call proof_open first"}
+    assert seen["bad_types"][0] and seen["missing"][0] and seen["unknown"][0], "the SDK refuses these itself"
+    assert json.loads(seen["still_alive"][1]) == {"error": "no session 's9'; call proof_open first"}
+
+
 # ---------------------------------------------------------------------- live
 
 
@@ -295,8 +392,8 @@ class TestLive:
         assert applied["ok"] is True and applied["error"] is None
         assert "Φ n" in applied["goal"][0] and '"H"' not in applied["goal"][0]
         assert server.proof_destruct(sid, "H")["available"]
-        # A real Rocq failure on apply gets the real error diagnosed -- v1 aligned the
-        # compiled pattern with the skeleton it came from and always said it fits.
+        # A real Rocq failure on apply gets the real error diagnosed -- aligning the
+        # compiled pattern with the skeleton it came from would always say it fits.
         sid2 = _open(server, "Basic.v", "exists_pure")
         assert server.proof_step(sid2, 'iIntros "H".')["ok"]
         failed = server.proof_destruct(

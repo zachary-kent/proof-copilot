@@ -4,20 +4,20 @@ A run always resumes from the graph; ``--fresh`` is what starts over.  Three rul
 
 * ``claimed`` (a worker was in flight when the process died) reopens -- unless an
   attempt row already holds a body the gate accepted, in which case the proof is
-  *salvaged* and no worker is spent (the legacy loop repeated the whole attempt);
+  *salvaged* and no worker is spent;
 * ``stuck`` reopens only while attempts remain at this epoch, so re-running
   ``pcp prove`` in a loop cannot buy a hopeless node two fresh workers per run;
 * ``contested`` stays: it is a statement question for the human.
 
-Two things a crash must not lose (review findings): a body is salvaged only when
-it was gated *for this statement epoch* -- the store's own lookup is epoch-blind,
-and a node reopened by a revision then dispatched carried an older gate-passing
-row for the statement it used to be, which the resume marked ``gated``; and a node
+Two things a crash must not lose: a body is salvaged only when it was gated *for
+this statement epoch* -- a node reopened by a revision then dispatched may carry an
+older gate-passing row for the statement it used to be, which must not mark it
+``gated``; and a node
 reopened after dying between ``finish_attempt`` and ``set_proof_status`` carries
 that attempt's evidence, so its next attempt is evidence-informed rather than a
 blind repeat.
 
-A third, from the durability wave: **work in flight is recovered, not lost**.  The
+A third (ARCHITECTURE.md §10): **work in flight is recovered, not lost**.  The
 worker that died with the process left its partial proof in the attempt directory
 (``<workroot>/<node>/a<attempt>/``, the scratch file named by ``pcp-node.json``).
 That body becomes the row's ``body`` and the node's evidence says so, so the next

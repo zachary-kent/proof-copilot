@@ -1,9 +1,9 @@
 """eval/ladder.py: the design-rung ladder.
 
 Nothing here runs ``pcp prove`` or a provider: the rung launcher is replaced by a
-``python -c`` stand-in, and preflight's machine probes are switched off.  The two
-legacy ladder bugs with a scenario (bugs-dash-eval ladder.py:384 and :391 -- outage
-sniffed from log text) are covered by ``test_outage_is_decided_from_records_not_log_text``.
+``python -c`` stand-in, and preflight's machine probes are switched off.  Outages are
+decided from records, never sniffed from log text
+(``test_outage_is_decided_from_records_not_log_text``).
 """
 
 from __future__ import annotations
@@ -150,7 +150,7 @@ def test_the_carry_is_every_earlier_rung_published_plus_the_paper(tmp_path: Path
     assert library_for(third, paths, carry=False) == [paths.paper]
     assert library_for(third, paths, brief="spec-only") == []
     # A rung published by *this* invocation wins over a stale earlier publication,
-    # and a rung between two selected ones is not skipped (legacy ladder.py:455).
+    # and a rung between two selected ones is not skipped.
     fresh = {"rwcas_design": tmp_path / "fresh_rwcas", "seqlock_design": tmp_path / "fresh_seqlock"}
     assert library_for(third, paths, fresh=fresh) == [fresh["rwcas_design"], fresh["seqlock_design"], paths.paper]
     assert library_for(LADDER[0], paths) == [paths.paper]
@@ -204,9 +204,9 @@ def test_publish_copies_the_latest_solution_and_reads_the_verdict_negative_first
 
 
 def test_outage_is_decided_from_records_not_log_text(tmp_path: Path, bench_dir: Path) -> None:
-    """bugs-dash-eval ladder.py:384/:391.  Structured signals only: a log tail that
-    quotes ``bwrap:`` is not an outage, and a run whose every attempt is a
-    ``runner-error`` is one even when nothing in the log says so."""
+    """Structured signals only: a log tail that quotes ``bwrap:`` is not an outage, and
+    a run whose every attempt is a ``runner-error`` is one even when nothing in the log
+    says so."""
     # Every recorded attempt failed underneath the worker: an outage.
     down = tmp_path / "down"
     Recorder(down, run_id="r1").write(_record("error", "claude is not on PATH or could not be started"))
@@ -220,13 +220,13 @@ def test_outage_is_decided_from_records_not_log_text(tmp_path: Path, bench_dir: 
     assert outage_of(exit_code=0, timed_out=False, spawn_error="", record_dir=down) == ""
     assert outage_of(exit_code=-9, timed_out=True, spawn_error="", record_dir=tmp_path / "none") == ""
     # Exit 2 is a refusal only when nothing was recorded: a run that spent its design
-    # rounds and exited 2 has records and is a result (spec-only ladder, 2026-09-04).
+    # rounds and exited 2 has records and is a result.
     assert outage_of(exit_code=2, timed_out=False, spawn_error="", record_dir=down) == ""
     assert "usage error" in outage_of(exit_code=2, timed_out=False, spawn_error="", record_dir=tmp_path / "none")
     assert "before any attempt" in outage_of(exit_code=1, timed_out=False, spawn_error="", record_dir=tmp_path / "none")
     assert "could not be started" in outage_of(exit_code=None, timed_out=False, spawn_error="python: no such file", record_dir=down)
 
-    # A rung whose log shouts every legacy marker but whose records are ordinary failures.
+    # A rung whose log shouts every outage marker but whose records are ordinary failures.
     paths = _paths(tmp_path, bench_dir, ("rwcas_design",))
     rung = LADDER[0]
     tag = tag_for("t", rung.name)
@@ -238,6 +238,16 @@ def test_outage_is_decided_from_records_not_log_text(tmp_path: Path, bench_dir: 
     row = run_rung(rung, paths, stamp="t", launcher=noisy)
     assert row["outage"] == "" and row["exit"] == 1
     assert "bwrap:" in row["tail"], "the text was there and was ignored"
+
+
+def test_a_run_that_spent_its_design_rounds_is_not_an_outage(tmp_path: Path) -> None:
+    rec = Recorder(tmp_path / "rec")
+    rec.write(AttemptRecord(run_id=rec.run_id, node="root", lemma="root", attempt=1, runner="claude", status="stuck",
+                            solved=False, elapsed_s=900.0, evidence="decomposition rejected: child 'x' has no statement"),
+              suffix="decompose")
+    assert outage_of(exit_code=2, timed_out=False, spawn_error="", record_dir=tmp_path / "rec") == ""
+    assert outage_of(exit_code=1, timed_out=False, spawn_error="", record_dir=tmp_path / "rec") == ""
+    assert "refused to start" in outage_of(exit_code=2, timed_out=False, spawn_error="", record_dir=tmp_path / "nothing")
 
 
 def test_run_rung_writes_a_live_log_and_the_summary_row(tmp_path: Path, bench_dir: Path) -> None:

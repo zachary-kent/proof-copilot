@@ -6,6 +6,7 @@ into the test's own directory.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -15,8 +16,17 @@ from pathlib import Path
 
 import pytest
 
+from pcp.config import env as penv
 from pcp.errors import UsageError
-from pcp.orch.protocol import ANSWER_FILE, NodePayload
+from pcp.orch.protocol import (
+    ANSWER_FILE,
+    MAX_WORKER_FILE_BYTES,
+    NodePayload,
+    read_answer_file,
+    read_edited_body,
+    read_result,
+)
+from pcp.orch.runners import cli as rcli
 from pcp.orch.runners.base import (
     RUNNER_NAMES,
     RunnerSpec,
@@ -28,6 +38,9 @@ from pcp.orch.runners.base import (
 from pcp.orch.runners.claude_code import ClaudeCodeSubagentRunner
 from pcp.orch.runners.cli import CLIRunner, claude_headless_runner, codex_cli_runner, decomposer_runner
 from pcp.orch.runners.sandbox import Sandbox
+from pcp.orch.runners.stream import parse_output
+from pcp.util.proc import Streamed
+from tests._orch_fixtures import bounded
 
 PY = sys.executable
 SCRATCH = "Lemma foo : True.\nProof.\n  admit.\nAdmitted.\n"
@@ -474,3 +487,65 @@ def test_direct_runner_is_unavailable_without_a_key(monkeypatch) -> None:
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert not DirectAPIRunner().available()
+
+
+def test_every_claude_run_raises_the_cli_output_ceiling(monkeypatch, tmp_path: Path) -> None:
+    """A long decomposer reply must not overrun the CLI's 64k output default: every run,
+    sandboxed or not, carries the raised ceiling unless the operator set one."""
+    monkeypatch.delenv(penv.CLAUDE_MAX_OUTPUT_TOKENS, raising=False)
+    assert penv.with_runner_defaults({})[penv.CLAUDE_MAX_OUTPUT_TOKENS] == penv.DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS
+    assert penv.with_runner_defaults({penv.CLAUDE_MAX_OUTPUT_TOKENS: "9"})[penv.CLAUDE_MAX_OUTPUT_TOKENS] == "9"
+    assert penv.CLAUDE_MAX_OUTPUT_TOKENS in penv.SANDBOX_PASSTHROUGH
+
+    seen: dict[str, object] = {}
+
+    async def fake_run_async(argv, **kw):
+        seen["env"] = kw.get("env")
+        return Streamed(list(argv), returncode=1)
+
+    monkeypatch.setattr(rcli, "run_async", fake_run_async)
+    runner = rcli.claude_headless_runner()
+    (tmp_path / "TASK.md").write_text("x", encoding="utf-8")
+    asyncio.run(rcli.run_cli(runner, NodePayload(node_id="n", name="n", statement="Lemma n : True.", file="f.v", workdir=tmp_path)))
+    assert seen["env"][penv.CLAUDE_MAX_OUTPUT_TOKENS] == penv.DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS
+    sb = Sandbox(ro_paths=(), masked=(), credentials=(), binaries=(), home=tmp_path)
+    assert sb.environment({"PATH": "/bin"})[penv.CLAUDE_MAX_OUTPUT_TOKENS] == penv.DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS
+
+
+# ---------------------------------------------------------------- what a worker leaves in its directory
+
+
+DEEP = "[" * 100_000 + "]" * 100_000
+
+
+@pytest.mark.parametrize("name", ["answer.json", "proof.v", "Dev.v", "extra.v"])
+def test_a_fifo_or_device_named_like_a_worker_file_never_blocks_the_reader(tmp_path, name):
+    os.mkfifo(tmp_path / name)
+    r = bounded(lambda: read_result(tmp_path, "", target="t", scratch_file="Dev.v"))
+    assert r.status == "stuck" and r.proof == ""
+    os.unlink(tmp_path / name)
+    os.symlink("/dev/zero", tmp_path / name)
+    r = bounded(lambda: read_result(tmp_path, "", target="t", scratch_file="Dev.v"))
+    assert r.status == "stuck"
+    if name == "answer.json":
+        assert "symlink" in r.evidence
+
+
+def test_a_directory_named_like_a_worker_file_does_not_raise(tmp_path):
+    for name in ("answer.json", "proof.v", "x.v"):
+        (tmp_path / name).mkdir()
+    r = read_result(tmp_path, "", target="t", scratch_file="Dev.v")
+    assert r.status == "stuck" and "not a regular file" in r.evidence
+
+
+def test_oversized_and_deeply_nested_answers_are_malformed_not_read(tmp_path):
+    big = tmp_path / "answer.json"
+    big.write_bytes(b'{"status":"qed","proof":"' + b"x" * (MAX_WORKER_FILE_BYTES + 1) + b'"}')
+    r = read_answer_file(big)
+    assert r.status == "stuck" and "limit" in r.evidence
+    big.write_text('{"status":"qed","proof":' + DEEP + "}")
+    assert read_answer_file(big).status == "stuck"
+    trace = parse_output('{"type":"assistant","message":{"content":' + DEEP + "}}\n", "claude")
+    assert trace.events == 0 and len(trace.stderr_lines) == 1
+    (tmp_path / "Dev.v").write_text("Lemma t : True.\nProof.\n  exact I.\nQed.\n")
+    assert read_edited_body(tmp_path, "t", scratch_file="Dev.v") == "exact I."

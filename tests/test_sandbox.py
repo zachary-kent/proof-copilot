@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,6 +54,7 @@ def sandbox(tmp_path: Path, **kw) -> Sandbox:
 
 def test_wrap_is_pure_and_clears_the_environment_to_an_allowlist(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PCP_BWRAP", "/fake/bwrap")
+    monkeypatch.setenv("OPAMROOT", str(tmp_path / "no-opam"))  # no pinned switch to append to PATH
     sb = sandbox(tmp_path)
     work = tmp_path / "work" / "n" / "a1"
     work.mkdir(parents=True)
@@ -76,6 +79,16 @@ def test_wrap_is_pure_and_clears_the_environment_to_an_allowlist(tmp_path: Path,
     assert cmd[-4:] == ["--", "claude", "-p", "--verbose"]
     assert cmd[cmd.index("--bind") + 1 : cmd.index("--bind") + 3] == [str(work.resolve())] * 2
     assert cmd[cmd.index("--chdir") + 1] == str(work.resolve())
+
+
+def test_the_pinned_switch_reaches_the_worker_path_after_the_operators(tmp_path: Path, monkeypatch) -> None:
+    """pcp finds the switch without `pcp env`, and so does a worker's own `coqc`."""
+    (tmp_path / "opam" / "pcp" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("OPAMROOT", str(tmp_path / "opam"))
+    monkeypatch.delenv("PCP_OPAM_SWITCH", raising=False)
+    env = sandbox(tmp_path).environment({"PATH": "/x/bin", "OPAMROOT": str(tmp_path / "opam")})
+    assert env["PATH"] == f"/x/bin:{tmp_path / 'opam' / 'pcp' / 'bin'}"
+    assert env["OPAMROOT"] == str(tmp_path / "opam"), "pcp inside resolves the same switch"
 
 
 def test_wrap_masks_after_binding_and_skips_masks_that_do_not_exist(tmp_path: Path, monkeypatch) -> None:
@@ -336,3 +349,343 @@ time.sleep(100)
     while time.monotonic() < deadline and run(["pgrep", "-f", f"sleep {marker}"]).returncode == 0:
         time.sleep(0.1)
     assert run(["pgrep", "-f", f"sleep {marker}"]).returncode != 0, "the worker's child outlived the kill"
+
+
+# ---------------------------------------------------------------- an installed pcp, a user's project
+
+
+def test_a_user_project_masks_only_its_run_state(tmp_path: Path) -> None:
+    """A user's docs/ and tests/ are their own; only ``.pcp`` (graph, answer key) hides,
+    with the docs index bound back."""
+    project = tmp_path / "proj"
+    sb = Sandbox.for_benchmark(project, masks=(), home=tmp_path / "home", install=())
+    assert sb.masked == (project.resolve() / ".pcp",)
+    assert sb.docs_paths == (project.resolve() / ".pcp" / "docs",)
+
+
+def test_for_benchmark_binds_pcps_own_install_and_the_opam_root(tmp_path: Path, monkeypatch) -> None:
+    import sys
+
+    import pcp
+    from pcp.orch.runners.sandbox import install_paths
+
+    monkeypatch.setenv("OPAMROOT", str(tmp_path / "opamroot"))
+    sb = Sandbox.for_benchmark(tmp_path / "proj", home=tmp_path / "home")
+    ro = set(sb.ro_paths)
+    assert tmp_path / "opamroot" in ro, "the toolchain follows OPAMROOT"
+    for path in (Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve(), Path(pcp.__file__).parent.resolve()):
+        assert path in ro or path in Path.home().resolve().parents or path == Path.home().resolve()
+    assert set(install_paths()) <= ro and "pcp" in sb.binaries
+
+
+def test_install_paths_never_bind_home_or_an_ancestor(monkeypatch) -> None:
+    import sys
+
+    from pcp.orch.runners.sandbox import install_paths
+
+    home = Path.home().resolve()
+    monkeypatch.setattr(sys, "prefix", str(home))
+    monkeypatch.setattr(sys, "base_prefix", "/")
+    paths = install_paths()
+    assert home not in paths and Path("/") not in paths
+
+
+def test_sandbox_for_uses_the_invocation_directory_and_checkout_masks_only_in_a_checkout(tmp_path: Path, monkeypatch) -> None:
+    import argparse
+
+    from pcp.cli import runners as cli_runners
+    from pcp.orch.runners import sandbox as sb_mod
+
+    monkeypatch.setattr(sb_mod, "available", lambda: True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    args = argparse.Namespace(reference=None)
+    box = cli_runners.sandbox_for(args, "claude", corpus_dir=project, library=[])
+    assert project.resolve() in box.ro_paths and box.masked == (project.resolve() / ".pcp",)
+    monkeypatch.chdir(REPO)
+    box = cli_runners.sandbox_for(args, "claude", corpus_dir=REPO, library=[])
+    assert {REPO / sub for sub in (".pcp", ".git", "eval", "docs", "tests")} <= set(box.masked)
+
+
+@needs_bwrap
+def test_the_running_pcp_install_works_inside_a_sandbox_of_a_user_project(tmp_path: Path) -> None:
+    """The probe for a ``uv tool`` install: pcp's interpreter and package live outside
+    the project (here: this venv, and for an editable install the checkout's ``pcp/``),
+    so only the install binds make ``pcp`` runnable inside.  Without them it is not."""
+    import sys
+
+    project = tmp_path / "proj"
+    (project / ".pcp" / "reference").mkdir(parents=True)
+    (project / ".pcp" / "reference" / "answer.v").write_text("the answer")
+    (project / ".pcp" / "docs").mkdir()
+    (project / ".pcp" / "docs" / "index.txt").write_text("index")
+    work = tmp_path / "work"
+    work.mkdir()
+    pcp_bin = Path(sys.prefix) / "bin" / "pcp"
+    if not pcp_bin.exists():
+        pytest.skip("no pcp entry point in this interpreter's prefix")
+    probe = (
+        f"'{pcp_bin}' --version && '{sys.executable}' -c 'import pcp.util.assets as a; a.idump_path(); a.skill_text(\"prover.md\"); print(\"ASSETS-OK\")'; "
+        f"cat '{project}/.pcp/reference/answer.v' 2>/dev/null; cat '{project}/.pcp/docs/index.txt'"
+    )
+    import dataclasses
+
+    box = dataclasses.replace(
+        Sandbox.for_benchmark(project, masks=(), network=False, home=Path.home(), root=tmp_path / "stage", binaries=()),
+        refresh_credentials=False, credentials=(),
+    )
+    out = run(box.wrap(["/bin/sh", "-c", probe], workdir=work), env=box.environment(), timeout=120)
+    assert out.returncode == 0, out.output
+    assert out.stdout.startswith("pcp ") and "ASSETS-OK" in out.stdout
+    assert "the answer" not in out.stdout and "index" in out.stdout
+    bare = dataclasses.replace(box, ro_paths=(project.resolve(),))
+    if any(Path(sys.prefix).resolve().is_relative_to(p) for p in (Path(s) for s in ("/usr", "/opt"))):
+        return  # a system interpreter is bound anyway; nothing to contrast
+    missing = run(bare.wrap(["/bin/sh", "-c", f"'{pcp_bin}' --version"], workdir=work), env=bare.environment(), timeout=60)
+    assert missing.returncode != 0, "pcp ran with no install binds -- the probe proves nothing"
+
+
+# ---------------------------------------------------------------- mount order: a mask is never undone
+
+
+_TREE = ("r", "r/a", "r/a/b", "r/a/b/c", "r/d", "r/d/e")
+_KINDS = (None, "ro", "mask", "unmask", "mask+unmask")
+
+
+def _policy_tree(tmp_path: Path) -> Path:
+    base = tmp_path / "t"
+    for node in _TREE:
+        (base / node).mkdir(parents=True, exist_ok=True)
+        (base / node / "f.txt").write_text(node)
+    return base.resolve()
+
+
+def _combo_sandbox(base: Path, combo: dict[str, str | None], tmp_path: Path) -> Sandbox:
+    def pick(kind: str) -> tuple[Path, ...]:
+        return tuple(base / n for n, k in combo.items() if k and kind in k.split("+"))
+
+    return Sandbox(
+        ro_paths=pick("ro"), masked=pick("mask"), unmasked=pick("unmask"), network=False, home=tmp_path / "home",
+        root=tmp_path / "stage", refresh_credentials=False, clearenv=False,
+    )
+
+
+def _expected_visible(combo: dict[str, str | None], node: str) -> bool:
+    """Most specific wins: the deepest rule on the node's ancestry decides, and a
+    mask beats a bind of the same path."""
+    chain = [n for n in _TREE if node == n or node.startswith(n + "/")]
+    for n in sorted(chain, key=len, reverse=True):
+        if combo[n]:
+            return "mask" not in combo[n].split("+")
+    return False
+
+
+def _simulated_visible(cmd: list[str], path: Path) -> bool:
+    """What bwrap would show at ``path``: the last mount on an ancestor-or-self."""
+    verdict = False
+    i = 0
+    while i < len(cmd) and cmd[i] != "--":
+        op = cmd[i]
+        if op in ("--ro-bind", "--bind"):
+            src, dst, i = cmd[i + 1], Path(cmd[i + 2]), i + 3
+            if path == dst or dst in path.parents:
+                verdict = src != "/dev/null"
+        elif op in ("--tmpfs", "--proc", "--dev", "--chdir"):
+            if op == "--tmpfs" and (path == Path(cmd[i + 1]) or Path(cmd[i + 1]) in path.parents):
+                verdict = False
+            i += 2
+        elif op == "--setenv":
+            i += 3
+        else:
+            i += 1
+    return verdict
+
+
+def _combos(n: int, seed: int) -> list[dict[str, str | None]]:
+    import random
+
+    rng = random.Random(seed)
+    return [{node: rng.choice(_KINDS) for node in _TREE} for _ in range(n)]
+
+
+def test_mount_order_never_lets_an_ancestor_bind_undo_a_mask(tmp_path: Path, monkeypatch) -> None:
+    """For any mix of read-only, masked and carved-back paths, a path under a mask is
+    hidden unless a bind *deeper than the mask* covers it -- whatever order the
+    policy lists them in (the root carved back over its own ``.pcp`` was the leak)."""
+    monkeypatch.setenv("PCP_BWRAP", "/fake/bwrap")
+    base = _policy_tree(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    for combo in _combos(1500, seed=7):
+        cmd = _combo_sandbox(base, combo, tmp_path).wrap(["x"], workdir=work)
+        for node in _TREE:
+            got = _simulated_visible(cmd, base / node / "f.txt")
+            assert got == _expected_visible(combo, node), (combo, node, cmd)
+
+
+def test_a_file_mask_is_blanked_not_tmpfsd(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PCP_BWRAP", "/fake/bwrap")
+    answer = tmp_path / "repo" / "answer.v"
+    answer.parent.mkdir()
+    answer.write_text("Qed.")
+    cmd = sandbox(tmp_path, masked=(answer,)).wrap(["x"], workdir=tmp_path)
+    at = cmd.index(str(answer.resolve()))
+    assert cmd[at - 2 : at] == ["--ro-bind", "/dev/null"]
+
+
+def _visible(box: Sandbox, paths: Sequence[Path], work: Path) -> set[Path]:
+    script = "; ".join(f'[ -e "{p}" ] && echo "{p}"' for p in paths) + "; true"
+    out = run(box.wrap(["/bin/sh", "-c", script], workdir=work), env=box.environment(), timeout=60)
+    assert out.returncode == 0, out.output
+    return {Path(line) for line in out.stdout.splitlines() if line}
+
+
+@needs_bwrap
+def test_mount_order_property_holds_under_real_bwrap(tmp_path: Path) -> None:
+    base = _policy_tree(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    for combo in _combos(12, seed=11):
+        box = _combo_sandbox(base, combo, tmp_path)
+        files = [base / node / "f.txt" for node in _TREE]
+        seen = _visible(box, files, work)
+        assert seen == {base / n / "f.txt" for n in _TREE if _expected_visible(combo, n)}, combo
+
+
+# ---------------------------------------------------------------- the project root `pcp prove --sandbox` binds
+
+
+def _cli_box(corpus: Path, *, reference: Path | None = None, workroot: Path | None = None) -> Sandbox:
+    import argparse
+
+    from pcp.cli import runners as cli_runners
+
+    box = cli_runners.sandbox_for(argparse.Namespace(reference=reference, workroot=workroot), "claude", corpus_dir=corpus, library=[])
+    return dataclasses.replace(box, refresh_credentials=False)
+
+
+def _checkout(path: Path) -> Path:
+    for sub in ("pcp", "eval/corpus/bench/X", "eval/corpus/bench/Y", ".git", "docs", "tests", ".pcp/reference"):
+        (path / sub).mkdir(parents=True, exist_ok=True)
+    (path / "pcp" / "__init__.py").write_text("")
+    (path / "pyproject.toml").write_text("")
+    (path / "eval/corpus/bench/X/F.v").write_text("Lemma x.")
+    (path / "eval/corpus/bench/Y/F.v").write_text("the design variant")
+    (path / ".git" / "HEAD").write_text("ref")
+    (path / ".pcp/reference/answer.v").write_text("Qed.")
+    return path.resolve()
+
+
+@pytest.fixture
+def fake_user(tmp_path: Path, monkeypatch) -> Path:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "transcript.jsonl").write_text("spoilers")
+    monkeypatch.setenv("HOME", str(home))
+    return home.resolve()
+
+
+@needs_bwrap
+def test_a_file_at_the_project_root_leaves_run_state_and_the_reference_hidden(tmp_path: Path, monkeypatch, fake_user) -> None:
+    """``pcp prove Foo.v L --sandbox`` at the root carves the root back as the corpus;
+    that bind must not undo the ``.pcp`` mask or the ``--reference`` inside it."""
+    project = tmp_path / "U"
+    (project / ".pcp" / "reference").mkdir(parents=True)
+    (project / ".pcp" / "eval").mkdir()
+    (project / ".pcp" / "docs").mkdir()
+    (project / ".pcp" / "reference" / "answer.txt").write_text("Qed.")
+    (project / ".pcp" / "eval" / "r.txt").write_text("an earlier run")
+    (project / ".pcp" / "docs" / "index.txt").write_text("index")
+    (project / "Foo.v").write_text("Lemma foo.")
+    project = project.resolve()
+    monkeypatch.chdir(project)
+    box = _cli_box(project, reference=project / ".pcp" / "reference")
+    work = tmp_path / "work"
+    work.mkdir()
+    answers = [project / ".pcp/reference/answer.txt", project / ".pcp/eval/r.txt"]
+    seen = _visible(box, [*answers, project / "Foo.v", project / ".pcp/docs/index.txt"], work)
+    assert not seen & set(answers)
+    assert {project / "Foo.v", project / ".pcp/docs/index.txt"} <= seen
+
+
+def test_home_and_its_ancestors_are_refused_as_the_sandbox_root(tmp_path: Path, monkeypatch, fake_user) -> None:
+    from pcp.errors import UsageError
+    from pcp.orch.runners import sandbox as sb_mod
+
+    monkeypatch.setattr(sb_mod, "available", lambda: True)
+    (fake_user / "F.v").write_text("Lemma f.")
+    for cwd in (fake_user, fake_user.parent, Path("/")):
+        monkeypatch.chdir(cwd)
+        with pytest.raises(UsageError, match="home directory or above"):
+            _cli_box(fake_user)
+    # A project under $HOME is fine, and $HOME's own .pcp is never taken for a project's.
+    (fake_user / ".pcp").mkdir()
+    (fake_user / "proj").mkdir()
+    monkeypatch.chdir(fake_user / "proj")
+    box = _cli_box(fake_user / "proj")
+    assert fake_user / "proj" in box.ro_paths and fake_user not in box.ro_paths
+
+
+def test_a_corpus_outside_the_project_is_refused_unless_pcp_staged_it(tmp_path: Path, monkeypatch, fake_user) -> None:
+    from pcp.errors import UsageError
+    from pcp.orch.runners import sandbox as sb_mod
+
+    monkeypatch.setattr(sb_mod, "available", lambda: True)
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "other").mkdir()
+    monkeypatch.chdir(tmp_path / "proj")
+    with pytest.raises(UsageError, match="outside the project"):
+        _cli_box((tmp_path / "other").resolve())
+    staged = tmp_path / "wr" / "staged"
+    staged.mkdir(parents=True)
+    box = _cli_box(staged.resolve(), workroot=(tmp_path / "wr").resolve())
+    assert staged.resolve() in box.unmasked
+
+
+@needs_bwrap
+def test_a_checkout_subdirectory_still_masks_the_sibling_rungs(tmp_path: Path, monkeypatch, fake_user) -> None:
+    """``cd eval && pcp prove ... --sandbox``: the root is the enclosing checkout."""
+    co = _checkout(tmp_path / "co")
+    monkeypatch.chdir(co / "eval")
+    corpus = co / "eval/corpus/bench/X"
+    box = _cli_box(corpus)
+    work = tmp_path / "work"
+    work.mkdir()
+    secrets = [co / "eval/corpus/bench/Y/F.v", co / ".git/HEAD", co / ".pcp/reference/answer.v"]
+    seen = _visible(box, [*secrets, corpus / "F.v"], work)
+    assert seen == {corpus / "F.v"}
+
+
+@needs_bwrap
+def test_the_parent_of_a_checkout_masks_the_nested_checkouts_answers(tmp_path: Path, monkeypatch, fake_user) -> None:
+    """Run from a directory holding a checkout (``~/src``): the root is that
+    directory, and the nested checkout's benchmarks and run state are found and
+    masked -- as is a ``.pcp`` left by an earlier run from any subdirectory."""
+    parent = tmp_path / "src"
+    co = _checkout(parent / "co")
+    (parent / "proj" / "sub" / ".pcp").mkdir(parents=True)
+    (parent / "proj" / "sub" / ".pcp" / "graph.db").write_text("old proofs")
+    (parent / "proj" / "F.v").write_text("Lemma f.")
+    parent = parent.resolve()
+    monkeypatch.chdir(parent)
+    box = _cli_box(parent / "proj")
+    work = tmp_path / "work"
+    work.mkdir()
+    secrets = [co / "eval/corpus/bench/Y/F.v", co / ".git/HEAD", co / ".pcp/reference/answer.v", parent / "proj/sub/.pcp/graph.db"]
+    seen = _visible(box, [*secrets, parent / "proj/F.v"], work)
+    assert seen == {parent / "proj/F.v"}
+
+
+def test_the_sandbox_root_is_the_enclosing_checkout_then_the_nearest_pcp_project(tmp_path: Path, fake_user) -> None:
+    from pcp.cli.runners import sandbox_root
+
+    co = _checkout(tmp_path / "co")
+    (co / "eval" / ".pcp").mkdir()
+    assert sandbox_root(co / "eval/corpus/bench/X") == co, "a checkout beats a nearer .pcp"
+    proj = tmp_path / "proj"
+    (proj / ".pcp").mkdir(parents=True)
+    (proj / "theories" / "x").mkdir(parents=True)
+    assert sandbox_root((proj / "theories" / "x").resolve()) == proj.resolve()
+    (tmp_path / "bare" / "d").mkdir(parents=True)
+    assert sandbox_root((tmp_path / "bare" / "d").resolve()) == (tmp_path / "bare" / "d").resolve()

@@ -704,8 +704,8 @@ class Scheduler:
     async def _run_with_deadline(self, node: Node, payload: NodePayload) -> NodeResult:
         """The runner enforces the clock; this is the backstop for one that does not.
 
-        A runner that never returned used to wedge the run with the node ``claimed``
-        forever (review finding).  Past the deadline plus the grace period the
+        A runner that never returns would otherwise wedge the run with the node
+        ``claimed`` forever.  Past the deadline plus the grace period the
         attempt is cancelled -- a subprocess runner kills its process group on
         cancellation -- and whatever the worker left in its directory is read back:
         a complete answer keeps its own status, anything else is a deadline ``stuck``

@@ -106,6 +106,4 @@ auditor    = "high"
 [flags]
 # Speculative machinery is off by default and may not break the canary.
 recursive_decomposition = false
-or_nodes = false
-strict_no_gap = false
 """

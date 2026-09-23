@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -430,7 +430,7 @@ def parse_payload(payload: dict[str, Any]) -> PlanProposal:
         name = str(entry.get("name", "")).strip()
         # `statement` is the documented key; a model that wrote `text` for its
         # definitions tends to write `text` here too, and a whole design round is
-        # too expensive to lose to a synonym (seqlock_design, 2026-09-04).
+        # too expensive to lose to a synonym.
         statement = _entry_text(entry, CHILD_STATEMENT_KEYS)
         if not _is_identifier(name):
             raise ProofEngineeringAttempt(f"child name {name!r} is not a Rocq identifier")
@@ -541,7 +541,7 @@ def validate_proposal(proposal: PlanProposal, *, require_children: bool = True) 
         if blocks[0].has_proof:
             problems.append(f"child {child.name!r} carries a proof")
         # One declaration is not enough: `Lemma foo : True. Unset Guard Checking.` is
-        # one block and two sentences, and Rocq accepts it (review finding).
+        # one block and two sentences, and Rocq accepts it.
         sentences = [s for s in split_sentences(strip_comments(child.statement)) if s.code.strip()]
         if len(sentences) != 1:
             problems.append(
@@ -1321,8 +1321,8 @@ class Decomposer:
         """Re-ask.  ``base`` is the proposal being revised: an answer that omits its
         children (a definitions-only compile repair) or its definitions (a
         children-only restatement) is completed from ``base`` *before* validation --
-        the prompt promises that an omitted part keeps its current form, and the
-        legacy validator rejected exactly such a repair as "no children".
+        the prompt promises that an omitted part keeps its current form, so such a
+        repair is never rejected as "no children".
 
         ``repair=True`` is the cheap tier: a compile, typecheck or contract failure of an
         otherwise accepted design is fixed by the approver runner (medium effort) and
@@ -1581,8 +1581,8 @@ class Decomposer:
             return fail(result.evidence or "the decomposer runner returned 'error' and no reason", infrastructure=True)
         if result.timed_out and payload is None:
             # A deadline is not a judgement -- and it is one whether or not the
-            # stream carried text.  The legacy triage parsed the text, found no
-            # JSON, and blamed the model for ignoring the protocol.
+            # stream carried text: finding no JSON in a killed stream is not the
+            # model ignoring the protocol.
             return fail(result.evidence or f"the decomposer exceeded its {payload_seconds(result)} deadline", deadline=True)
         if not text.strip():
             violation = result.evidence or f"the decomposer runner returned {result.status!r} and no output"
@@ -1673,7 +1673,3 @@ class Decomposer:
 def payload_seconds(result: NodeResult) -> str:
     seconds = result.cost.get("seconds") if isinstance(result.cost, dict) else None
     return f"{float(seconds):.0f}s" if seconds else "clock"
-
-
-def proposal_names(proposals: Iterable[PlanProposal]) -> list[str]:
-    return [name for p in proposals for name in p.names()]

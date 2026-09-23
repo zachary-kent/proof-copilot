@@ -81,6 +81,40 @@ def test_atomic_write_and_json_round_trip(tmp_path: Path) -> None:
     assert not [q for q in p.parent.iterdir() if q.name.startswith(".f.json.")]
 
 
+def test_atomic_write_keeps_mode_and_follows_symlinks(tmp_path: Path) -> None:
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    real = real_dir / "config.toml"
+    real.write_text("old\n", encoding="utf-8")
+    real.chmod(0o640)
+    link = tmp_path / "config.toml"
+    link.symlink_to(real)
+
+    atomic_write_text(link, "new\n", follow_symlinks=True, keep_mode=True)
+
+    assert link.is_symlink(), "the symlink itself must survive, not become a plain file"
+    assert real.read_text(encoding="utf-8") == "new\n"
+    assert os.stat(real).st_mode & 0o777 == 0o640, "the target's existing mode is preserved"
+
+
+def test_atomic_write_new_file_gets_umask_default_not_mkstemps_0600(tmp_path: Path) -> None:
+    old = os.umask(0o022)
+    try:
+        p = tmp_path / "fresh.txt"
+        atomic_write_text(p, "x", follow_symlinks=True, keep_mode=True)
+        assert os.stat(p).st_mode & 0o777 == 0o644
+    finally:
+        os.umask(old)
+
+
+def test_atomic_write_plain_call_keeps_mkstemps_0600(tmp_path: Path) -> None:
+    """Callers relying on the historical private-by-default behaviour (graph/record/
+    credentials-adjacent files) get it unless they opt in."""
+    p = tmp_path / "private.json"
+    atomic_write_text(p, "{}")
+    assert os.stat(p).st_mode & 0o777 == 0o600
+
+
 def test_slug_is_collision_free() -> None:
     assert slug("foo_bar") == "foo_bar"
     assert slug("foo.bar") != slug("foo_bar")

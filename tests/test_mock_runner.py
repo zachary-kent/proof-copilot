@@ -49,3 +49,17 @@ async def test_raise_for_raises_and_on_dispatch_sees_the_payload(tmp_path: Path)
     assert seen == ["foo"]
     with pytest.raises(RuntimeError, match="scripted crash for boom"):
         await runner.run_node(node(tmp_path, "boom"))
+
+
+async def test_the_mock_returns_a_scripted_error_directly_without_an_answer_file(tmp_path):
+    from pcp.orch.protocol import ANSWER_FILE, NodePayload
+    from pcp.orch.runners.mock import MockRunner
+
+    runner = MockRunner({"x": "exact I."}, statuses={"x": "error"})
+    node = NodePayload(node_id="x", name="x", statement="Lemma x : True.", file="", workdir=tmp_path / "a1")
+    result = await runner.run_node(node)
+    assert result.status == "error" and "scripted error" in result.evidence and result.exit_code == 1
+    assert not (tmp_path / "a1" / ANSWER_FILE).exists()
+    assert result.cost["requests"] == 1 and result.trace["model"] == "mock"
+    ok = await MockRunner({"x": "exact I."}).run_node(node)
+    assert ok.status == "qed" and ok.exit_code == 0 and (tmp_path / "a1" / ANSWER_FILE).exists()

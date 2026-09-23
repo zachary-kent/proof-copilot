@@ -7,7 +7,7 @@ arithmetic says "build mask tooling"; a one-shot says nothing needs building.  P
 calls per solved lemma* -- and one it does not name but should: the **friction
 sequence**, the errors a worker saw and recovered from.
 
-Two properties the legacy parser lacked, both paid for by live rungs:
+Two properties, both paid for by live rungs:
 
 * **Usage is accumulated from every assistant message**, not read once from the final
   ``result`` event, so a worker killed at its deadline still reports what it spent;
@@ -260,7 +260,7 @@ def _event(line: str) -> dict[str, Any] | None:
         event = json.loads(stripped)
     except (ValueError, RecursionError):
         # A line nested 100 000 deep is not an event; it must not become the runner's
-        # exception either (review finding).
+        # exception either.
         return None
     return event if isinstance(event, dict) else None
 
@@ -332,7 +332,7 @@ def _record_failure(trace: WorkerTrace, call: ToolCall | None, text: str, *, fla
 
     Pattern-based failure detection applies only to tools that *execute* something;
     for ``Read``/``Grep``/``Edit`` only the CLI's own ``is_error`` counts, so reading a
-    file that mentions ``Error:`` does not record a failure (legacy bug 13).
+    file that mentions ``Error:`` does not record a failure.
     """
     executing = call is None or _is_executing(call.name)
     failed = flagged or (executing and _looks_failed(text))

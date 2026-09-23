@@ -7,7 +7,7 @@ they diff, and a human can read one without a viewer.
 
 Record directories are keyed by the graph's global attempt id, which is unique by
 construction, so a design round or a decomposer re-ask can never overwrite an
-earlier record (six audit bugs).  Writing twice to the same directory is refused.
+earlier record (ARCHITECTURE.md §8).  Writing twice to the same directory is refused.
 """
 
 from __future__ import annotations
@@ -186,8 +186,8 @@ def _safe(name: str) -> str:
 def _unique_run_id(base: Path, stamp: str) -> str:
     """``stamp``, or ``stamp-N`` when that directory already exists.
 
-    The run id has one-second resolution; two runs started in the same second shared
-    a record directory and the second refused to write (review finding).  ``mkdir``
+    The run id has one-second resolution, so two runs started in the same second
+    would otherwise share a record directory.  ``mkdir``
     is the claim, so two processes cannot both win the same name.
     """
     base.mkdir(parents=True, exist_ok=True)

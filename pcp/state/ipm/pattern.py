@@ -372,13 +372,9 @@ class Destructuring:
         binder = f" ({' '.join(self.binders)})" if self.binders else ""
         return f'iDestruct "{hyp}" as{binder} "{self.pattern_text}".'
 
-    def iintros(self) -> str:
-        binder = f" ({' '.join(self.binders)})" if self.binders else ""
-        return f'iIntros{binder} "{self.pattern_text}".'
-
 
 class _Namer:
-    """Fresh names that avoid the live context (v1 emitted ``H1`` next to an existing ``H1``)."""
+    """Fresh names that avoid the live context (never ``H1`` next to an existing ``H1``)."""
 
     def __init__(self, base: str, taken: Iterable[str]) -> None:
         self.base = base.strip('"') or "H"

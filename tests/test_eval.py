@@ -1,11 +1,9 @@
 """eval/harness.py and eval/ablations.py: the held-out-lemma harness on the prove pipeline.
 
-Each legacy harness bug (bugs-dash-eval) is either impossible by construction -- a
-runner per arm (harness.py:349), a task directory removed before the task starts
-(harness.py:182), a record subtree per arm and task (harness.py:255), the packet
-written by ``pcp prove`` itself (harness.py:209) -- or has a test named after it
-below (error accounting, harness.py:299; silent holdout skips, harness.py:122;
-recording that cannot be switched off, harness.py:342).
+Most harness guarantees hold by construction -- a runner per arm, a task directory
+removed before the task starts, a record subtree per arm and task, the packet written
+by ``pcp prove`` itself; the rest have a test named after them below (error
+accounting, holdouts reported rather than skipped, recording that can be switched off).
 """
 
 from __future__ import annotations
@@ -101,9 +99,8 @@ def test_deltas_give_a_verdict_per_rung_and_none_for_an_arm_that_only_errored() 
 
 
 def test_the_control_arm_runner_carries_no_mcp_grant_and_the_ledger_arm_does() -> None:
-    """bugs-dash-eval harness.py:349 (four reports): the legacy harness built one
-    runner with the union of every arm's tools.  Here the runner is a function of the
-    arm alone, so the baseline's argv has no ``--mcp-config`` and no ``mcp__pcp__*``."""
+    """The runner is a function of the arm alone, never the union of every arm's tools,
+    so the baseline's argv has no ``--mcp-config`` and no ``mcp__pcp__*``."""
     cfg = load(None)
     control, _ = arm_spec("claude", LADDER["baseline"], cfg=cfg)
     assert control.mcp_tools == ()
@@ -154,7 +151,7 @@ def test_collect_benchmark_reads_every_holdout_of_a_design_rung(bench_dir: Path)
 
 
 def test_a_holdout_the_corpus_file_does_not_have_is_reported_not_silently_skipped(tmp_path: Path, bench_dir: Path, capsys) -> None:
-    """bugs-dash-eval harness.py:122: the legacy loader shrank ``n`` without a word."""
+    """A missing holdout is reported; ``n`` never shrinks without a word."""
     corpus = tmp_path / "corpus"
     shutil.copytree(bench_dir / "rwcas_design", corpus)
     meta = json.loads((corpus / "bench.json").read_text())
@@ -187,7 +184,7 @@ def test_collect_tasks_holds_out_a_qed_proof_into_a_copy_and_leaves_the_library_
 
 
 def test_metrics_count_errors_separately_and_keep_them_out_of_the_rate() -> None:
-    """bugs-dash-eval harness.py:299: a missing binary is not an unsolved lemma."""
+    """A missing binary is not an unsolved lemma."""
     m = Metrics(ablation="ledger")
     m.add(Outcome(file="a.v", lemma="a", status="qed", solved=True, tokens=100, tool_calls=4, checks=2, elapsed_s=10, dollars=0.5))
     m.add(Outcome(file="a.v", lemma="b", status="stuck", error="Unable to unify"))
@@ -210,7 +207,7 @@ def test_metrics_count_errors_separately_and_keep_them_out_of_the_rate() -> None
 
 
 def test_a_task_directory_is_fresh_per_run_and_a_crashing_runner_is_an_error_outcome(tmp_path: Path, canary_dir: Path) -> None:
-    """bugs-dash-eval harness.py:182: nothing an earlier run left can be scored."""
+    """Nothing an earlier run left can be scored."""
     task = _canary_task(tmp_path, canary_dir)
     paths = ArmPaths(workroot=tmp_path / "work" / "baseline")
     stale = paths.task_root(task) / "work" / "stale" / "answer.json"

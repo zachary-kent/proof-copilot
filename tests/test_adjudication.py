@@ -281,7 +281,7 @@ def test_amendment_prompt_carries_the_request_the_evidence_and_the_ban(tmp_path)
     ):
         assert needle in text, needle
     assert "`I` today:" in text, "the definition as it stands is shown"
-    # Review finding: a stronger hypothesis is a weaker theorem, so the approver is told
+    # A stronger hypothesis is a weaker theorem, so the approver is told
     # what an unsatisfiable conjunct does and to reject it.
     assert "**unsatisfiable**" in text and "`False`" in text and "proves every specification that assumes it" in text
     replaced = AmendmentRequest(definition="I", replace="Definition I (γ : gname) : iProp Σ := True%I.")

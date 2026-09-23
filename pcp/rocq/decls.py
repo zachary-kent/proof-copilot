@@ -116,10 +116,6 @@ class ProofBlock:
         return self.ender == "Admitted"
 
     @property
-    def terminated(self) -> bool:
-        return self.kind != "script" or self.ender is not None
-
-    @property
     def end(self) -> int:
         """Offset just past the whole block (statement, proof and ender)."""
         if self.ender_end is not None:
@@ -168,10 +164,6 @@ def _classify(code: str) -> tuple[str, str | None] | None:
 
 def is_proof_opener(code: str) -> bool:
     return bool(_PROOF_OPENER.match(code))
-
-
-def is_term_proof(code: str) -> bool:
-    return bool(_PROOF.match(code)) and not _PROOF_OPENER.match(code)
 
 
 def proof_ender(code: str) -> str | None:
@@ -308,8 +300,3 @@ def find_block(source: str, name: str) -> ProofBlock | None:
         if block.name == name:
             return block
     return None
-
-
-def declaration_names(source: str) -> list[str | None]:
-    """The names of every declaration, in order (``None`` for anonymous ones)."""
-    return [b.name for b in parse_blocks(source)]

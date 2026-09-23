@@ -146,7 +146,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def banner(text: str) -> None:
     """Print the startup line; a non-UTF-8 stdout (LANG=C under systemd) must not
-    kill the server after the port is bound (review finding)."""
+    kill the server after the port is bound."""
     try:
         print(text, flush=True)
     except UnicodeEncodeError:

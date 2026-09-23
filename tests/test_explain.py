@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
-import _ipm_standin  # noqa: F401
 import pytest
 from conftest import needs_petanque, needs_rocq
 
+from pcp.errors import StateError, UsageError
 from pcp.rocq.assemble import Development
 from pcp.rocq.project import CompileResult, compile_text
-from pcp.state.explain import TWIN_INFIX, error_offsets, explain, locate_failure, twin_path
+from pcp.state.explain import (
+    TWIN_INFIX,
+    Located,
+    _no_tactic_failed,
+    error_offsets,
+    explain,
+    locate_failure,
+    twin_path,
+)
+from tests._orch_fixtures import write_plain
 
 ONE_LINE = 'Lemma x : True.\nProof. iIntros "[H]". exact I. Qed.\n'
 TWO = (
@@ -105,3 +117,68 @@ def test_qed_time_error_gets_the_goals_remain_diagnosis(tmp_path: Path, scratch_
     out = explain(assembly_text=text, assembled_path_name="Basic.v", compile_output_or_result=result,
                   root=work, target="destruct_nested", verbose=True)
     assert "goals remain" in out, out
+
+
+# ------------------------------------------------------------------ pcp check, from the command line
+
+
+def _pcp(*args: str, cwd: Path) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "-m", "pcp.cli.main", *args], cwd=str(cwd), capture_output=True, text=True, check=False)
+
+
+def test_pcp_check_reports_a_missing_body_or_development_without_a_traceback(tmp_path):
+    dev_path, _ = write_plain(tmp_path, plan=None)
+    packet = tmp_path / "packet"
+    packet.mkdir()
+    meta = {"target": "root", "anchor": "root", "file": str(dev_path), "statement": "Lemma root (P Q : Prop) : P -> Q -> P.", "siblings": [], "scratch": "Plain.v"}
+    (packet / "pcp-node.json").write_text(json.dumps(meta), encoding="utf-8")
+    missing = _pcp("check", "--body", str(tmp_path / "nope.v"), cwd=packet)
+    assert missing.returncode == 2 and "no such body file" in missing.stderr and "Traceback" not in missing.stderr
+    meta["file"] = str(tmp_path / "gone" / "Plain.v")
+    (packet / "pcp-node.json").write_text(json.dumps(meta), encoding="utf-8")
+    gone = _pcp("check", "--body", str(dev_path), cwd=packet)
+    assert gone.returncode == 2 and "is gone" in gone.stderr and "Traceback" not in gone.stderr
+
+
+def test_usage_errors_from_the_body_argument_are_usage_errors():
+    from pcp.cli.common import read_body_arg
+
+    with pytest.raises(UsageError, match="no such body file"):
+        read_body_arg(Path("/nonexistent/body.v"))
+
+
+# ------------------------------------------------------------------ diagnosis wording and the replay budget
+
+
+def test_a_shelved_existential_is_not_blamed_on_a_bullet() -> None:
+    located = Located("ev2", 0, 10)
+    shelved = _no_tactic_failed(located, ["a.", "b."], False, True, no_goals_shown=True)
+    assert "shelved" in shelved and "Unshelve" in shelved and "bullet" not in shelved
+    open_goal = _no_tactic_failed(located, ["a.", "b."], False, True, no_goals_shown=False)
+    assert "bullet or brace" in open_goal
+
+
+def test_explain_bounds_petanque_start_by_its_budget(monkeypatch, tmp_path: Path) -> None:
+    """`pcp check`'s replay builds its own pool: `petanque/start` sits under the wall
+    budget too, not under the 600 s default."""
+    seen: dict[str, object] = {}
+
+    class FakePool:
+        def __init__(self, workspace, size=2, **cfg) -> None:
+            seen.update(cfg)
+
+        def open(self, *args, **kwargs):
+            raise StateError("no pet in this test")
+
+        def close(self) -> None:
+            seen["closed"] = True
+
+    monkeypatch.setattr("pcp.state.pool.SessionPool", FakePool)
+    monkeypatch.setattr("pcp.state.explain.petanque_available", lambda: True)
+    text = "Lemma x : True.\nProof. exact I. exact I. Qed.\n"
+    output = 'File "./X.v", line 2, characters 16-24:\nError: No such goal.'
+    out = explain(assembly_text=text, assembled_path_name="X.v", compile_output_or_result=output, root=tmp_path,
+                  target="x", budget_seconds=7, verbose=True)
+    assert "could not run" in out and seen.get("closed") is True
+    assert isinstance(seen["start_timeout"], float) and 7 <= seen["start_timeout"] <= 60
+    assert not list(tmp_path.glob("*__pcp*"))

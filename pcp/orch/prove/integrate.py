@@ -3,8 +3,8 @@
 A plan *integrates* only when its glue ``Qed``s -- here the glue is the root itself,
 proved from children that must by then be proved rather than admitted -- and the
 whole file compiles with ``Print Assumptions ⊆ whitelist``.  The gate's own axiom
-check is the oracle: the legacy loop re-derived a stricter "no assumptions at all"
-rule and refused developments the gate had accepted.
+check is the oracle: no stricter "no assumptions at all" rule is re-derived here to
+refuse developments the gate accepted.
 
 The solution export is the artifact a ladder rung hands forward.  Its header is
 computed from the *artifact* (``Admitted`` blocks found by the declaration parser,
@@ -44,9 +44,8 @@ def stale_demands(graph: Graph, nodes: Sequence[Node]) -> list[tuple[Node, str, 
 def integrate(graph: Graph, dev: Development, gate: Gate, root: Node, *, preamble: str = "") -> tuple[bool, str]:
     """Completion has a machine oracle: ``Qed`` plus a clean ``Print Assumptions``,
     with every demand edge current -- a proof checked against an obligation's
-    earlier statement is not a proof of the plan (review finding: stale edges were
-    never consulted).  The status writes are one transaction: a crash between them
-    left half a plan ``integrated``."""
+    earlier statement is not a proof of the plan.  The status writes are one
+    transaction, so a crash between them cannot leave half a plan ``integrated``."""
     nodes = obligations(graph, dev)
     missing = [n.name for n in nodes if not (n.body and n.proof_status in PROVED_STATUSES)]
     if missing:

@@ -167,7 +167,7 @@ def test_trace_oracle_probes_each_step_at_its_own_state(tmp_path: Path, capsys) 
     out = tmp_path / "exists_pure.jsonl"
     assert main(["trace", str(BASIC), "exists_pure", "--oracle", "-o", str(out)]) == 0
     steps = [r for r in _rows(out) if r["rec"] == "step"]
-    # "H" exists only at step 1: a probe at the final state (v1) would have answered
+    # "H" exists only at step 1: a probe at the final state would have answered
     # "no such hypothesis" and left `persistent` unknown.
     assert [h["id"] for h in steps[1]["goals"][0]["spatial"]] == ["H"]
     assert steps[1]["goals"][0]["spatial"][0]["persistent"] is False

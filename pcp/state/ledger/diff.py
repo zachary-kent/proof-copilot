@@ -11,11 +11,10 @@ The matching rules, per context class, name-first / hash-second:
 
 Goal alignment is suffix-anchored and compares goals **modulo evar instantiation**, so
 ``iExists 3`` instantiating ``?x`` in an untouched sibling does not fabricate a
-``GoalSplit`` (legacy bug).  A step is classified by how many goals it touched:
+``GoalSplit``.  A step is classified by how many goals it touched:
 
 * the focused goal has no counterpart and no children -> **closed**: ``GoalClosed`` plus
-  the consumption of every live spatial hypothesis, whether or not siblings remain
-  (legacy: closing a non-final goal recorded nothing);
+  the consumption of every live spatial hypothesis, whether or not siblings remain;
 * one child -> the ordinary diff;
 * several children -> ``GoalSplit``; a hypothesis that moved to a child is still live
   there and is *not* consumed; only what is gone from every child is consumed;
@@ -276,11 +275,6 @@ def replay_events(steps: Sequence[Step]) -> list[Event]:
             out += diff_step(prev, list(s.goals), step=s.step, tactic=s.tactic)
         prev = list(s.goals)
     return out
-
-
-def parent_goal_id(prev_goals: list[IrisGoal]) -> str | None:
-    """The goal a step acted on: petanque focuses ``goals[0]``."""
-    return prev_goals[0].goal_id if prev_goals else None
 
 
 @dataclass(frozen=True)

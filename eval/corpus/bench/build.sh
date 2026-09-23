@@ -82,8 +82,8 @@ design_seqlock() {
   # proof rung was built. The names stay opaque; DESIGN.md's glossary carries the
   # roles, which is what a designer actually needs.  Primed lemmas (`wp_array_copy_to'`,
   # `wp_array_copy_to_half'`) are named by their *own* pseudonyms (`x17`, `d24` --
-  # see rename_map in the proof rung's reference.json); the legacy builder never
-  # renamed a primed identifier and left them as `ac19'`/`a25'`.
+  # see rename_map in the proof rung's reference.json); a primed identifier is
+  # renamed too, never left as `ac19'`/`a25'`.
   local ref="$repo/.pcp/reference/seqlock/Mf6dd3f_reference.v"
   "$py" "$repo/eval/make_benchmark.py" "$ref" \
     --holdout bd31_spec x34_spec fc32_spec \

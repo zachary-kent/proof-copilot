@@ -22,11 +22,44 @@ jobs:
       - name: install
         run: |
           python -m pip install -U pip
-          pip install -e '.[dev]' 'pytanque @ git+https://github.com/LLM4Rocq/pytanque'
+          pip install -e '.[dev]'
       - name: lint
         run: ruff check pcp tests eval
       - name: test
         run: pytest -q -m "not rocq and not petanque"
+
+  install:
+    # A NON-editable install behaves like the checkout: build sdist -> wheel, install the
+    # wheel into a fresh venv, run the installed `pcp` from outside the checkout, and
+    # load every packaged asset (skills, IDump.v, the toolchain script and pins) from
+    # site-packages.  No toolchain here, so `pcp doctor` may exit nonzero.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - name: build and install the wheel into a fresh venv
+        run: |
+          uv build --out-dir "$RUNNER_TEMP/dist"
+          uv venv --python 3.11 "$RUNNER_TEMP/venv"
+          uv pip install --python "$RUNNER_TEMP/venv/bin/python" "$RUNNER_TEMP"/dist/*.whl
+      - name: run the installed pcp outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir project && cd project && git init -q .
+          "$RUNNER_TEMP/venv/bin/pcp" --version
+          "$RUNNER_TEMP/venv/bin/pcp" doctor || echo "doctor exited $? (no toolchain in this job)"
+          "$RUNNER_TEMP/venv/bin/pcp" doctor 2>/dev/null | grep -q "skills/prover.md *ok"
+          "$RUNNER_TEMP/venv/bin/pcp" setup --dry-run
+          "$RUNNER_TEMP/venv/bin/pcp" init && test -f .pcp/config.toml && grep -qx '.pcp/' .gitignore
+          "$RUNNER_TEMP/venv/bin/python" -c "import pcp, pcp.util.assets as a; from pcp.cli.cmd_prove import load_skills; from pcp.state.ipm.reflect import idump_source; assert 'site-packages' in pcp.__file__; assert load_skills()[0].strip(); assert idump_source().is_file(); assert all(p is None for _, p in a.check_assets()); print('assets ok from', pcp.__file__)"
+      - name: the wheel test (tests/test_install.py)
+        run: |
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -e '.[dev]'
+          .venv/bin/python -m pytest -q -m slow tests/test_install.py
 
   canary:
     # The golden end-to-end run of the daily loop, with scripted workers.
@@ -42,20 +75,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.opam
-          key: opam-${{ runner.os }}-${{ hashFiles('env.sh') }}
+          key: opam-${{ runner.os }}-${{ hashFiles('pcp/assets/toolchain.env', 'pcp/assets/setup-toolchain.sh') }}
       - name: install opam
         run: |
           sudo apt-get update
           sudo apt-get install -y opam bubblewrap
       - name: build the toolchain
         if: steps.opam-cache.outputs.cache-hit != 'true'
-        run: ./scripts/setup-toolchain.sh
+        run: bash pcp/assets/setup-toolchain.sh
       - name: install pcp
         run: |
           python -m pip install -U pip
-          pip install -e '.[mcp,dev]' 'pytanque @ git+https://github.com/LLM4Rocq/pytanque'
+          pip install -e '.[mcp,dev]'
       - name: canary
         run: |
-          . ./env.sh
-          export ROCQPATH="$HOME/.opam/pcp/lib/coq/user-contrib"
+          eval "$(pcp env)"
           pytest -q tests/test_canary.py tests/test_gate.py tests/test_cli.py tests/test_rocq.py

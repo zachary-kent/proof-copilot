@@ -1,10 +1,9 @@
 """The one runner factory: ``RunnerSpec`` -> ``Runner`` (PLAN.md 11).
 
 "Own the graph, rent the runner."  Running one node attempt is commodity, so it sits
-behind the :class:`pcp.orch.protocol.Runner` protocol and is built *here only*.  The
-legacy tree plumbed options per runner by keyword, and four of them were silently
-dropped on the way (an ``--effort`` that never reached codex, tools baked into one
-runner for every rung).  A :class:`RunnerSpec` names every option once, and
+behind the :class:`pcp.orch.protocol.Runner` protocol and is built *here only*.  Options
+plumbed per runner by keyword get silently dropped on the way (an ``--effort`` that
+never reaches codex, tools baked into one runner for every rung).  A :class:`RunnerSpec` names every option once, and
 :func:`build_runner` refuses -- with ``UsageError`` -- any option the chosen runner
 would ignore, instead of pretending it applied (ARCHITECTURE.md 8, "runner options
 silently dropped").

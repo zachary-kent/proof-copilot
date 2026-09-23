@@ -136,7 +136,7 @@ def test_a_design_predicate_as_an_argument_of_inv_is_not_a_resource_outside_the_
 T = "{{{ True }}} e #() {{{ RET #(); True }}}."
 
 
-def test_triple_sentinel_iris_false_positives_from_review() -> None:
+def test_triple_sentinel_accepts_persistent_iris_shapes() -> None:
     """Shapes a real Iris development states before a triple that ARE persistent."""
     ok = [
         "Lemma a N l : inv N (∃ n : nat, l ↦ #n ∗ own γ (● MaxNat n)) -∗ " + T,   # ↦ inside inv
@@ -154,7 +154,7 @@ def test_triple_sentinel_iris_false_positives_from_review() -> None:
         assert resources_outside_triple("x", st) == [], st
 
 
-def test_triple_sentinel_iris_false_negatives_from_review() -> None:
+def test_triple_sentinel_flags_shapes_unusable_before_a_boxed_triple() -> None:
     """Shapes that are genuinely unusable before a □-boxed triple."""
     bad = [
         "Lemma a l v : (∀ n, {{{ True }}} f #n {{{ RET #(); True }}}) -∗ l ↦ v -∗ " + T,   # premise after a triple-shaped premise
@@ -168,7 +168,7 @@ def test_triple_sentinel_iris_false_negatives_from_review() -> None:
         assert len(resources_outside_triple("x", st)) == 1, st
 
 
-def test_triple_sentinel_design_predicates_from_review() -> None:
+def test_triple_sentinel_unfolds_design_predicates() -> None:
     defs = {
         "p16": "Definition p16 (γ : gname) (ws : list val) (Q : iProp Σ) : iProp Σ := (∀ vs, own γ (◯E vs) ={⊤}=∗ Q).",
         "mixed": "Definition mixed (l : loc) (v : val) : iProp Σ := (⌜v = #0⌝ ∗ l ↦ v)%I.",
@@ -189,7 +189,7 @@ def test_triple_sentinel_design_predicates_from_review() -> None:
         assert resources_outside_triple("x", st, definitions=defs) == [], prem
 
 
-def test_triple_sentinel_second_review_pass() -> None:
+def test_triple_sentinel_on_mixed_resource_shapes_and_multiline_definitions() -> None:
     ok = [
         'Lemma a N l : inv (N .@ "x") (l ↦ #0) -∗ ' + T,
         "Lemma b N l : inv (nroot .@ \"c\") (l ↦ #0) -∗ " + T,

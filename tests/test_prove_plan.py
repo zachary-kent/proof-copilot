@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from pcp.errors import UsageError
 from pcp.orch.model import node_id
+from pcp.orch.prove import prove
+from pcp.orch.prove.integrate import integrate
 from pcp.orch.prove.plan import build_graph, has_children, plan_nodes, plan_sentinels
-from tests._orch_fixtures import PLAN_SOURCE, plain_cfg
+from pcp.orch.runners.mock import MockRunner
+from pcp.orch.schedule import repin_edges
+from tests._orch_fixtures import ANSWERS, PLAN_SOURCE, FakeGate, build_plain_graph, plain_cfg
 from tests.conftest import needs_rocq
 
 
@@ -178,3 +183,58 @@ def test_the_plan_preamble_reaches_the_gate_and_the_worker(tmp_path, canary_dir)
     assert "From iris.bi Require Import bi." in scratch.read_text()
     assert result.solution is None
     result.close()
+
+
+# ------------------------------------------------------------------ stale demand edges (PLAN.md 8.1)
+
+
+def test_integration_refuses_a_stale_demand_edge_and_a_regated_proof_repins_it(tmp_path):
+    graph, root, dev = build_plain_graph(tmp_path, names=("c1",))
+    c1 = node_id("c1")
+    for n in (c1, root.id):
+        graph.set_proof_status(n, "claimed")
+        graph.record_proof(n, "exact I.")
+    # c1 is restated (epoch 1): the root's proof was of c1@0.
+    graph.update(c1, statement="Lemma c1 (P : Prop) : P -> P -> P.", epoch=1, proof_status="open", body=None, role="human")
+    graph.set_proof_status(c1, "claimed")
+    graph.record_proof(c1, "intros H _. exact H.")
+    assert graph.stale_edges(root.id) == [(c1, 0, 1)]
+    ok, detail = integrate(graph, dev, FakeGate(), root)
+    assert not ok and "stale" in detail and "c1" in detail
+    assert graph.by_name("root").proof_status == "gated", "nothing was half-integrated"
+    repin_edges(graph, root.id)  # what recording a re-checked proof does
+    assert graph.stale_edges(root.id) == []
+    ok, detail = integrate(graph, dev, FakeGate(), root)
+    assert ok, detail
+    assert graph.summary() == {"integrated": 2}
+    graph.close()
+
+
+def test_a_restated_plan_child_makes_the_run_recheck_the_roots_proof(tmp_path, monkeypatch):
+    """End to end with a scripted gate: the root was proved against c1@0; the user
+    restates c1; the next run replays the root's proof and re-pins (or reopens it)."""
+    monkeypatch.setattr("pcp.orch.prove.Gate", lambda d, **kw: FakeGate())
+    cfg = plain_cfg(tmp_path)
+    first = asyncio.run(prove(cfg, MockRunner(dict(ANSWERS))))
+    assert first.integrated and first.graph.stale_edges(node_id("root")) == []
+    first.close()
+    cfg.plan.write_text(PLAN_SOURCE.replace("Lemma c1 (P : Prop) : P -> P.", "Lemma c1 (P : Prop) : P -> P -> P."), encoding="utf-8")
+    dispatched: list[str] = []
+    second = asyncio.run(prove(cfg, MockRunner(dict(ANSWERS), on_dispatch=lambda p: dispatched.append(p.name))))
+    assert second.integrated, second.render()
+    replayed = next(e for e in second.graph.events_since() if e["kind"] == "edges.revalidated")
+    assert replayed["payload"] == {"kept": ["root"], "reopened": []}
+    assert dispatched == ["c1"], "the root's proof still held on replay: not re-dispatched"
+    assert second.graph.stale_edges(node_id("root")) == []
+    second.close()
+    # And when the replay fails, the root is reopened and re-dispatched.
+    cfg3 = plain_cfg(tmp_path / "b")
+    asyncio.run(prove(cfg3, MockRunner(dict(ANSWERS)))).close()
+    cfg3.plan.write_text(PLAN_SOURCE.replace("Lemma c2 (Q : Prop) : Q -> Q.", "Lemma c2 (Q : Prop) : Q -> Q -> Q."), encoding="utf-8")
+    monkeypatch.setattr("pcp.orch.prove.Gate", lambda d, **kw: FakeGate(reject=("intros H _.",)))  # the root's body
+    dispatched.clear()
+    third = asyncio.run(prove(cfg3, MockRunner(dict(ANSWERS), on_dispatch=lambda p: dispatched.append(p.name))))
+    assert not third.integrated and set(dispatched) == {"c2", "root"}
+    replayed = next(e for e in third.graph.events_since() if e["kind"] == "edges.revalidated")
+    assert replayed["payload"]["reopened"] == ["root"]
+    third.close()

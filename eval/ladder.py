@@ -22,14 +22,13 @@ Under ``--brief spec-only`` a rung is given the specification and nothing else: 
 ``DESIGN.md``, no paper, no earlier solution -- the argv carries no ``--library`` at
 all, by construction (:func:`rung_argv` refuses one).
 
-Two lessons the legacy ladder paid for are structural here:
+Two rules are structural here:
 
 * **An outage is not a result.**  A revoked credential once consumed two rungs in
   under a minute each.  The ladder stops on an outage, and decides "outage" from
   structured signals only -- the orchestrator's exit status and the run's own
   records -- never by grepping the log, which quotes worker evidence and gate tails
-  and so once classified a stuck proof as a bwrap failure (bugs-dash-eval:
-  ladder.py:384, :391).
+  and so can make a stuck proof look like a bwrap failure.
 * **Preflight before spend.**  Proof rungs are refused (the design is given there,
   which is a different experiment), budgets must fit a revision round, ``bwrap`` and
   the provider are probed -- each in seconds, each learned from a lost night.

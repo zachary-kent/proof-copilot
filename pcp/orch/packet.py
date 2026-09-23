@@ -7,14 +7,13 @@ same sentence.  Everything in the packet is *computed*: no model writes another
 model's brief.
 
 Every attempt gets a **fresh** directory ``<root>/<node.id>/a<attempt_id>/`` (removed
-first if it exists).  The legacy packet reused one workdir per node, so a stale
-``answer.json`` from attempt 1 was read as attempt 2's answer -- nine bugs in the
-audit, all of them impossible once nothing stale can be there.
+first if it exists), so a stale ``answer.json`` from attempt 1 can never be read as
+attempt 2's answer (ARCHITECTURE.md §8).
 
 A retry that follows a killed or failed attempt gets the recovered partial proof in
 the scratch file *and* under its own heading (PLAN.md 6: "requeue with the partial
-trace as evidence"); the legacy retry started from ``admit.`` and was merely told a
-partial had existed.
+trace as evidence"), rather than starting from ``admit.`` and being told a partial
+existed.
 """
 
 from __future__ import annotations
@@ -123,7 +122,7 @@ def build_packet(
     of its arguments, which is what makes it deterministic.  ``extra_preamble`` is
     the plan's own preamble (extra ``Require`` lines): it goes into the scratch file
     exactly as the gate inserts it, and into ``pcp-node.json`` so ``pcp check`` can
-    do the same -- the legacy loop computed it and dropped it (PLAN.md 8.11).
+    do the same (PLAN.md 8.11).
     """
     del graph
     workdir = attempt_dir(root, node.id, attempt_id)

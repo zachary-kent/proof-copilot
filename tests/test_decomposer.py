@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+from pathlib import Path
 
 import pytest
 
 from pcp.errors import RoleViolation
+from pcp.orch.contract import DesignContract
 from pcp.orch.decomposer import (
     ChildStatement,
     Decomposer,
@@ -18,17 +20,29 @@ from pcp.orch.decomposer import (
     already_declared,
     assert_statement_only,
     blank_predicates,
+    drop_redundant_children,
     extract_json,
+    json_in_stream,
+    parse_payload,
     parse_proposal,
     render_amendment_task,
     render_decomposition_task,
     validate_proposal,
 )
+from pcp.orch.graph import Graph
 from pcp.orch.model import Node, node_id
 from pcp.orch.protocol import NodeResult
+from pcp.orch.prove.design import DesignError, DesignViolatesContract, apply_design, design_rounds_used
+from pcp.orch.record import Recorder
 from pcp.orch.runners.base import decomposer_runner
 from pcp.rocq.assemble import Development
-from tests._orch_fixtures import build_plain_graph
+from tests._orch_fixtures import (
+    BadRecorder,
+    HangingRunner,
+    ScriptedDecomposerRunner,
+    build_plain_graph,
+    plain_cfg,
+)
 
 # --- barrier 1: capability ------------------------------------------------------
 
@@ -348,3 +362,266 @@ def test_the_amendment_prompt_pins_its_strings(tmp_path):
     assert "given and frozen" in text2 and "the revised design, complete" not in text2
     text3 = render_amendment_task(_node(), Development(given), design=[], evidence="does not compile", round_no=2, kind="design")
     assert "could not be applied" in text3 and "checker's" in text3 and "obligations were not proved" not in text3
+
+
+# --- tolerant reading of real replies ----------------------------------------------
+
+
+def test_a_child_statement_under_the_text_key_is_accepted() -> None:
+    """A child statement under `text` (the key definitions use) is read as its statement."""
+    payload = {
+        "children": [
+            {"name": "hist_map_snap_lookup", "text": "Lemma hist_map_snap_lookup (k : nat) : k = k."},
+            {"name": "other", "statement": "Lemma other : True."},
+        ]
+    }
+    proposal = parse_payload(payload)
+    assert [c.name for c in proposal.children] == ["hist_map_snap_lookup", "other"]
+    assert proposal.children[0].statement.startswith("Lemma hist_map_snap_lookup")
+    assert validate_proposal(proposal) == []
+
+
+def test_a_definition_under_a_synonym_key_is_accepted() -> None:
+    """Definition and child text under a synonym key (`coq`, `code`) is read."""
+    proposal = parse_payload({
+        "definitions": [{"name": "tk20", "coq": "Definition tk20 (k : nat) : Prop := k = k."},
+                        {"name": "cp21", "code": "Definition cp21 : Prop := True."}],
+        "children": [{"name": "n60", "coq": "Lemma n60 : True."}],
+    })
+    assert [d.name for d in proposal.definitions] == ["tk20", "cp21"]
+    assert proposal.children[0].statement.startswith("Lemma n60")
+
+
+def test_an_entry_whose_text_hides_under_any_vernacular_valued_key_is_read() -> None:
+    """An entry's text is found under any key whose value is a vernacular sentence."""
+    p = parse_payload({
+        "definitions": [{"name": "tk", "statement": "Definition tk : Prop := True.", "notes": "receipt"},
+                        {"name": "wl", "decl": "Definition wl : Prop := True."}],
+        "children": [{"name": "c", "obligation": "Lemma c : True."}],
+    })
+    assert [d.name for d in p.definitions] == ["tk", "wl"] and p.children[0].name == "c"
+
+
+def test_a_definitions_only_repair_is_completed_from_the_base_before_validation() -> None:
+    """A repair that restates only the definitions keeps its base's children, so it is
+    validated as a whole plan."""
+    base = parse_payload({
+        "definitions": [{"name": "value", "text": "Definition value : nat := 0."}],
+        "children": [{"name": "c1", "statement": "Lemma c1 : True."}],
+    })
+    repair = parse_payload({"definitions": [{"name": "value", "text": "Definition value : nat := 1."}]})
+    assert validate_proposal(repair)  # alone it is not a plan
+    merged = repair.merged_over(base)
+    assert [c.name for c in merged.children] == ["c1"]
+    assert merged.definitions[-1].text.endswith(":= 1.")
+    assert validate_proposal(merged) == []
+
+
+def test_the_decomposer_merges_a_repair_over_its_base_before_validating(tmp_path: Path) -> None:
+    src = tmp_path / "D.v"
+    src.write_text("Definition value : nat := 0.\nLemma root : True.\nProof.\nAdmitted.\n", encoding="utf-8")
+    graph = Graph(tmp_path / "g.db")
+    root = graph.add_node(Node(id=node_id("root"), name="root", statement="Lemma root : True.", statement_status="frozen", rank="root"))
+    base = parse_payload({
+        "definitions": [{"name": "value", "text": "Definition value : nat := 0."}],
+        "children": [{"name": "c1", "statement": "Lemma c1 : 1 = 1."}],
+    })
+    dec = Decomposer(None, graph, Development(src), tmp_path / "work", None)
+    answer = json.dumps({"definitions": [{"name": "value", "text": "Definition value : nat := 1."}]})
+    result = NodeResult(status="qed", raw=answer, trace={"final_text": answer})
+    out = dec._triage(root, result, attempt_id=graph.start_attempt(root.id, runner="mock", owner="human", role="decomposer"), round_no=2, base=base)
+    assert out.ok, out.problems
+    assert out.proposal is not None and [c.name for c in out.proposal.children] == ["c1"]
+    graph.close()
+
+
+def test_a_child_that_restates_the_root_is_dropped_not_fatal(tmp_path: Path) -> None:
+    """A child restating the root or an existing lemma is dropped with a note; the rest
+    of the revision survives."""
+    src = tmp_path / "D.v"
+    src.write_text("Lemma helper : True.\nProof. exact I. Qed.\nLemma root : 1 = 1.\nProof.\nAdmitted.\n", encoding="utf-8")
+    root = Node(id=node_id("root"), name="root", statement="Lemma root : 1 = 1.", statement_status="frozen", rank="root")
+    proposal = parse_payload({"children": [
+        {"name": "root", "statement": "Lemma root : 1 = 1."},
+        {"name": "helper", "statement": "Lemma helper : True."},
+        {"name": "same_as_root", "statement": "Lemma same_as_root : 1 = 1."},
+        {"name": "c_new", "statement": "Lemma c_new : 2 = 2."},
+    ]})
+    kept, notes = drop_redundant_children(Development(src), root, proposal)
+    assert [c.name for c in kept.children] == ["c_new"]
+    assert len(notes) == 3 and all("dropped child" in n for n in notes)
+    assert validate_proposal(kept) == []
+    # Nothing left is still a problem the validator reports (a plan with no children).
+    only_root = parse_payload({"children": [{"name": "root", "statement": "Lemma root : 1 = 1."}]})
+    empty, _ = drop_redundant_children(Development(src), root, only_root)
+    assert validate_proposal(empty)
+
+
+def test_a_repair_reask_uses_the_approver_and_is_not_a_design_round(tmp_path: Path) -> None:
+    """A syntax repair is re-asked of the approver, never the decomposer, and does not
+    spend a design round."""
+    class Scripted:
+        def __init__(self, name, text):
+            self.name, self.text, self.calls = name, text, 0
+
+        def available(self):
+            return True
+
+        async def run_node(self, node):
+            self.calls += 1
+            return NodeResult(status="qed", raw=self.text, trace={"final_text": self.text, "model": self.name})
+
+    src = tmp_path / "D.v"
+    src.write_text("Lemma root : True.\nProof.\nAdmitted.\n", encoding="utf-8")
+    graph = Graph(tmp_path / "g.db")
+    root = graph.add_node(Node(id=node_id("root"), name="root", statement="Lemma root : True.", statement_status="frozen", rank="root"))
+    fixed = json.dumps({"children": [{"name": "c1", "statement": "Lemma c1 : 1 = 1."}]})
+    decomposer, approver = Scripted("decomposer", fixed), Scripted("approver", fixed)
+    d = Decomposer(decomposer, graph, Development(src), tmp_path / "work", None, approver=approver)
+    out = asyncio.run(d.amend(root, evidence="Syntax error in c1", round_no=2, budget_seconds=5, kind="design", repair=True))
+    assert out.ok and approver.calls == 1 and decomposer.calls == 0
+    assert graph.attempts_for(root.id)[-1]["role"] == "repairer"
+    assert design_rounds_used(graph, root) == 0, "a repair never counts as a design round"
+    graph.close()
+
+
+# --- the protocol under attack ------------------------------------------------------
+
+
+def test_a_child_statement_with_a_trailing_sentence_is_refused(tmp_path):
+    for trailer in ("Unset Guard Checking.", "Set Nested Proofs Allowed.", "Set Printing All."):
+        p = parse_proposal(json.dumps({"children": [{"name": "foo", "statement": f"Lemma foo : True. {trailer}"}]}))
+        problems = validate_proposal(p)
+        assert any("exactly one sentence" in x for x in problems), (trailer, problems)
+    graph, root, dev = build_plain_graph(tmp_path, names=())
+    cfg = plain_cfg(tmp_path)
+    smuggled = PlanProposal(children=(ChildStatement("foo", "Lemma foo : True. Unset Guard Checking."),))
+    with pytest.raises(DesignViolatesContract, match="Guard Checking"):
+        apply_design(cfg, graph, dev, root, smuggled, contract=DesignContract(allow_additions=True), round_no=1, workroot=tmp_path / "w")
+    harmless = PlanProposal(children=(ChildStatement("foo", "Lemma foo : True. Set Printing All."),))
+    with pytest.raises(DesignViolatesContract, match="single statement sentence"):
+        apply_design(cfg, graph, dev, root, harmless, contract=DesignContract(allow_additions=True), round_no=1, workroot=tmp_path / "w")
+    graph.close()
+
+
+def _stream(*turns: str, tool_result: str = "") -> str:
+    lines = []
+    for text in turns:
+        lines.append(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}))
+        if tool_result:
+            lines.append(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content": tool_result}]}}))
+    lines.append(json.dumps({"type": "result", "result": turns[-1]}))
+    return "\n".join(lines)
+
+
+def test_a_plan_stated_in_an_earlier_turn_is_found(tmp_path):
+    plan = '{"children": [{"name": "c9", "statement": "Lemma c9 : True."}]}'
+    template = '{"children": [{"name": "helper_lemma_name", "statement": "Lemma helper_lemma_name : True."}]}'
+    raw = _stream("Here is the plan:\n```json\n" + plan + "\n```", "Done.", tool_result="TASK.md says: " + template)
+    assert json_in_stream(raw)["children"][0]["name"] == "c9", "assistant text only, never a tool result"
+    assert json_in_stream("not a stream") is None
+
+    class Runner:
+        name = "stream"
+
+        def available(self):
+            return True
+
+        async def run_node(self, node):
+            return NodeResult(status="qed", raw=raw, trace={"final_text": "Done.", "model": "m"})
+
+    graph, root, dev = build_plain_graph(tmp_path, names=())
+    out = asyncio.run(Decomposer(Runner(), graph, dev, tmp_path / "w").propose(root, None, budget_seconds=5))
+    assert out.ok and out.proposal.names() == ["c9"], out.render()
+    graph.close()
+
+
+def test_decomposer_records_keep_the_stream_and_a_recorder_failure_does_not_end_the_run(tmp_path):
+    plan = '{"children": [{"name": "c9", "statement": "Lemma c9 : True."}]}'
+    raw = _stream(plan)
+
+    class Runner:
+        name = "stream"
+
+        def available(self):
+            return True
+
+        async def run_node(self, node):
+            return NodeResult(status="qed", raw=raw, trace={"final_text": plan, "model": "m"})
+
+    graph, root, dev = build_plain_graph(tmp_path, names=())
+    rec = Recorder(tmp_path / "rec", run_id="run")
+    out = asyncio.run(Decomposer(Runner(), graph, dev, tmp_path / "w", rec).propose(root, None, budget_seconds=5))
+    assert out.ok
+    transcript = (tmp_path / "rec" / "run" / f"root.{out.attempt_id}.decompose" / "transcript.txt").read_text(encoding="utf-8")
+    assert '"type": "assistant"' in transcript, "the full event stream, not the final text"
+    out2 = asyncio.run(Decomposer(Runner(), graph, dev, tmp_path / "w", BadRecorder()).propose(root, None, budget_seconds=5))
+    assert out2.ok and "record.failed" in [e["kind"] for e in graph.events_since()]
+    graph.close()
+
+
+def test_a_decomposer_runner_that_never_returns_is_a_deadline_and_protocol_slips_are_stuck_rows(tmp_path):
+    graph, root, dev = build_plain_graph(tmp_path, names=())
+    d = Decomposer(HangingRunner(), graph, dev, tmp_path / "w", deadline_grace_s=0.1)
+    out = asyncio.run(asyncio.wait_for(d.propose(root, None, budget_seconds=0.2), timeout=20))
+    assert out.deadline and not out.infrastructure and not out.ok
+    rows = graph.attempts_for(root.id)
+    assert rows[-1]["status"] == "stuck" and rows[-1]["finished"] is not None
+    violation = ScriptedDecomposerRunner(['{"children": [{"name": "c", "statement": "Lemma c : True. Proof. exact I. Qed."}]}'])
+    out2 = asyncio.run(Decomposer(violation, graph, dev, tmp_path / "w").propose(root, None, budget_seconds=5))
+    assert out2.violation and graph.attempts_for(root.id)[-1]["status"] == "stuck"
+
+    class Broken:
+        name = "broken"
+
+        def available(self):
+            return True
+
+        async def run_node(self, node):
+            return NodeResult(status="error", evidence="`claude` is not on PATH")
+
+    out3 = asyncio.run(Decomposer(Broken(), graph, dev, tmp_path / "w").propose(root, None, budget_seconds=5))
+    assert out3.infrastructure and graph.attempts_for(root.id)[-1]["status"] == "error"
+    graph.close()
+
+
+ADVERSARIAL_REPLIES = {
+    "json_with_braces_in_strings": ('{"rationale": "the triple {{{ P }}} e {{{ Q }}} is }", "children": [{"name": "c9", "statement": "Lemma c9 : True."}]}', "ok"),
+    "unset_guard_checking_definition": ('{"definitions": ["Unset Guard Checking."], "children": [{"name": "c9", "statement": "Lemma c9 : True."}]}', "apply"),
+    "nested_proofs_definition": ('{"definitions": ["Set Nested Proofs Allowed."], "children": [{"name": "c9", "statement": "Lemma c9 : True."}]}', "apply"),
+    "axiom_definition": ('{"definitions": ["Axiom magic : False."], "children": [{"name": "c9", "statement": "Lemma c9 : True."}]}', "apply"),
+    "lemma_with_proof_as_definition": ('{"definitions": [{"name": "h", "text": "Lemma h : True. Proof. exact I. Qed."}], "children": [{"name": "c9", "statement": "Lemma c9 : True."}]}', "refused"),
+    "child_restating_the_root": ('{"children": [{"name": "again", "statement": "Lemma again (P Q : Prop) : P -> Q -> P."}]}', "refused"),
+    "child_restating_an_existing_lemma": ('{"children": [{"name": "helper", "statement": "Lemma helper (P Q : Prop) : P -> Q -> Q."}]}', "refused"),
+    "child_without_trailing_period": ('{"children": [{"name": "c9", "statement": "Lemma c9 : True"}]}', "ok"),
+    "definitions_only": ('{"definitions": ["Definition v : nat := 0."], "children": []}', "refused"),
+    "duplicate_names": ('{"children": [{"name": "c9", "statement": "Lemma c9 : True."}, {"name": "c9", "statement": "Lemma c9 : False."}]}', "refused"),
+    "import_that_is_not_a_require": ('{"imports": ["Import foo."], "children": [{"name": "c9", "statement": "Lemma c9 : True."}]}', "refused"),
+    "child_with_a_trailing_escape_hatch": ('{"children": [{"name": "c9", "statement": "Lemma c9 : True. Unset Guard Checking."}]}', "refused"),
+    "children_not_a_list": ('{"children": "Lemma c9 : True."}', "refused"),
+    "no_json_at_all": ("I would rather discuss the design in prose.", "refused"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(ADVERSARIAL_REPLIES))
+def test_every_adversarial_reply_is_refused_with_a_reaskable_problem(tmp_path, name):
+    reply, expectation = ADVERSARIAL_REPLIES[name]
+    graph, root, dev = build_plain_graph(tmp_path, names=())
+    cfg = plain_cfg(tmp_path)
+    out = asyncio.run(Decomposer(ScriptedDecomposerRunner([reply]), graph, dev, tmp_path / "w").propose(root, None, budget_seconds=5))
+    assert out.render().strip(), "every verdict is text the decomposer can be re-asked with"
+    assert not out.infrastructure
+    if expectation == "refused":
+        assert not out.ok, out.render()
+        assert "Traceback" not in out.render()
+        return
+    assert out.ok, out.render()
+    contract = DesignContract(allow_additions=True)
+    if expectation == "apply":
+        with pytest.raises(DesignError) as exc:
+            apply_design(cfg, graph, dev, root, out.proposal, contract=contract, round_no=1, workroot=tmp_path / "w")
+        assert "Traceback" not in str(exc.value)
+        assert graph.get_meta("designed_file") is None and not list((tmp_path / "w").glob("*.designed*"))
+    else:
+        assert out.proposal.children[0].statement.endswith(".")
+    graph.close()

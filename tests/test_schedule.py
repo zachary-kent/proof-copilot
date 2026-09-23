@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import time
 from pathlib import Path
@@ -11,9 +12,11 @@ import pytest
 
 from pcp.orch.model import Node, node_id
 from pcp.orch.protocol import NodePayload, NodeResult
+from pcp.orch.record import Recorder
+from pcp.orch.runners.cli import CLIRunner, run_cli
 from pcp.orch.runners.mock import WRONG_PROOF, MockRunner
 from pcp.orch.schedule import NodeOutcome, RunReport, Scheduler, attempts_spent, failure_evidence, siblings_of
-from tests._orch_fixtures import ANSWERS, FakeGate, build_plain_graph
+from tests._orch_fixtures import ANSWERS, BadRecorder, FakeGate, HangingRunner, build_plain_graph
 
 
 def scheduler(graph, dev, runner, tmp_path, **kw) -> Scheduler:
@@ -344,8 +347,8 @@ def test_review_after_zero_is_the_old_behaviour(tmp_path):
 
 
 def test_review_is_reached_at_the_default_budget(tmp_path):
-    """Review finding: with --attempts 2 --review-after 2 (both defaults) the check only
-    ran before an attempt, so the second failure ended the loop unreviewed."""
+    """With --attempts 2 --review-after 2 (both defaults) the second failure is offered
+    for review, not ended unreviewed: the check also runs after an attempt."""
     graph, root, dev = build_plain_graph(tmp_path, names=("c1",))
     report = asyncio.run(scheduler(graph, dev, MockRunner({}), tmp_path, max_attempts=2, review_after=2).run())
     c1 = next(o for o in report.outcomes if o.name == "c1")
@@ -369,4 +372,92 @@ def test_a_node_reopened_by_an_amendment_retries_before_any_review(tmp_path):
     again = asyncio.run(scheduler(graph, dev, MockRunner({}), tmp_path, max_attempts=4, review_after=2).run())
     c1 = next(o for o in again.outcomes if o.name == "c1")
     assert c1.attempts == 1 and c1.review, "one retry against the amended design, then the review reads that failure"
+    graph.close()
+
+
+# ------------------------------------------------------------------ liveness: broken runners and recorders
+
+
+def test_a_runner_that_never_returns_is_cut_off_at_the_deadline(tmp_path):
+    graph, root, dev = build_plain_graph(tmp_path, names=("c1",))
+    s = scheduler(graph, dev, HangingRunner(), tmp_path, node_seconds=0.3, deadline_grace_s=0.2, max_attempts=2)
+    started = time.perf_counter()
+    report = asyncio.run(asyncio.wait_for(s.run(), timeout=20))
+    assert time.perf_counter() - started < 10, "the run wedged"
+    assert {o.status for o in report.outcomes} == {"stuck"}
+    assert all(o.attempts == 2 for o in report.outcomes), "a deadline is retried once, with evidence"
+    assert all("did not stop it" in o.evidence for o in report.outcomes)
+    assert graph.summary() == {"stuck": 2}, "nothing stays claimed"
+    rows = graph.attempts_for(node_id("c1"))
+    assert len(rows) == 2 and all(r["finished"] is not None and r["status"] == "stuck" for r in rows)
+    graph.close()
+
+
+def test_a_hung_runner_that_wrote_its_answer_first_is_honoured(tmp_path):
+    graph, root, dev = build_plain_graph(tmp_path, names=("c1",))
+    runner = HangingRunner({"status": "qed", "proof": "intros H. exact H."})
+    report = asyncio.run(asyncio.wait_for(scheduler(graph, dev, runner, tmp_path, node_seconds=0.2, deadline_grace_s=0.1).run(), timeout=20))
+    assert {o.status for o in report.outcomes} == {"qed"}
+    assert graph.by_name("c1").proof_status == "gated" and graph.by_name("c1").body == "intros H. exact H."
+    graph.close()
+
+
+def test_a_recorder_failure_does_not_lose_a_gated_proof(tmp_path):
+    graph, root, dev = build_plain_graph(tmp_path, names=("c1",))
+    report = asyncio.run(scheduler(graph, dev, MockRunner(dict(ANSWERS)), tmp_path, recorder=BadRecorder()).run())
+    assert {o.status for o in report.outcomes} == {"qed"}
+    assert graph.summary() == {"gated": 2}
+    assert "record.failed" in [e["kind"] for e in graph.events_since()]
+    graph.close()
+
+
+SCRIPTS = {
+    "hang": "sleep 30",
+    "proof_then_fail": "printf 'intros H. exact H.' > proof.v; echo oops >&2; exit 1",
+    "malformed": "echo '{not json' > answer.json",
+    "binary_junk": "printf '\\xff\\xfe{\"status\":\"qed\"}' > answer.json",
+    "exit_no_answer": "echo 'Failed to authenticate' >&2; exit 1",
+    "contested": "echo '{\"status\":\"contested\",\"evidence\":\"the statement is false\"}' > answer.json",
+    "list_proof": "echo '{\"status\":\"qed\",\"proof\":[\"exact I.\"]}' > answer.json",
+    "wrapped": "echo '{\"status\":\"qed\",\"proof\":\"Proof. intros H. exact H. Qed.\"}' > answer.json",
+    "edited_scratch": "sed -i 's/^admit\\.$/intros H. (* half *)/' Plain.v; sleep 30",
+    "gate_fail_twice": f"echo '{{\"status\":\"qed\",\"proof\":\"{WRONG_PROOF}\"}}' > answer.json",
+}
+
+
+class ScriptRunner(CLIRunner):
+    """A real ``bash`` worker per node, chosen by node name."""
+
+    def __init__(self) -> None:
+        super().__init__(argv=["bash", "-c", "true"], name="script", binary="bash", stream="text")
+
+    async def run_node(self, node: NodePayload) -> NodeResult:
+        clone = copy.copy(self)
+        clone.argv = ["bash", "-c", SCRIPTS.get(node.name, "true")]
+        return await run_cli(clone, node)
+
+
+def test_adversarial_cli_workers_all_terminate_in_the_four_shapes(tmp_path):
+    graph, root, dev = build_plain_graph(tmp_path, names=tuple(SCRIPTS))
+    rec = Recorder(tmp_path / "rec", run_id="run")
+    s = scheduler(graph, dev, ScriptRunner(), tmp_path, node_seconds=1.0, max_attempts=2, recorder=rec, concurrency=16)
+    started = time.perf_counter()
+    report = asyncio.run(asyncio.wait_for(s.run(), timeout=60))
+    assert time.perf_counter() - started < 20
+    by = {o.name: o for o in report.outcomes}
+    assert {o.status for o in report.outcomes} <= {"qed", "stuck", "contested", "error"}
+    assert not [n.name for n in graph.nodes() if n.proof_status == "claimed"]
+    assert all(r["finished"] is not None for n in graph.nodes() for r in graph.attempts_for(n.id))
+    assert by["hang"].status == "stuck" and by["hang"].attempts == 2 and "deadline" in by["hang"].evidence
+    assert by["proof_then_fail"].status == "qed" and graph.by_name("proof_then_fail").body == "intros H. exact H."
+    assert by["wrapped"].status == "qed"
+    assert by["malformed"].status == "stuck" and "malformed answer.json" in by["malformed"].evidence
+    assert by["binary_junk"].status == "stuck" and by["list_proof"].status == "stuck"
+    assert by["exit_no_answer"].status == "error" and by["exit_no_answer"].attempts == 1
+    assert by["contested"].status == "contested" and graph.by_name("contested").proof_status == "contested"
+    assert by["edited_scratch"].status == "stuck" and "recovered a 1-line partial proof" in by["edited_scratch"].evidence
+    assert by["gate_fail_twice"].status == "stuck" and by["gate_fail_twice"].attempts == 2
+    dirs = [p for p in (tmp_path / "work").rglob("a*") if p.is_dir()]
+    assert len(dirs) == report.dispatched == len(list((tmp_path / "rec" / "run").iterdir()))
+    assert len(report.render().splitlines()) <= 24
     graph.close()

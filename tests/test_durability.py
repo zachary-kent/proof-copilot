@@ -1,4 +1,4 @@
-"""Durability of the run (wave 5): outage pause, in-flight recovery, supervision,
+"""Durability of the run (ARCHITECTURE.md §10): outage pause, in-flight recovery, supervision,
 ladder resume.
 
 Each test names the scenario it pins.  Sleeps and the clock inside

@@ -86,7 +86,7 @@ def test_iris_precedences() -> None:
     assert shape(parse_skeleton("P ∨ Q -∗ R")) == shape(parse_skeleton("(P ∨ Q) -∗ R"))
     assert shape(parse_skeleton("P -∗ Q -∗ R")) == shape(parse_skeleton("P -∗ (Q -∗ R)"))
     assert parse_skeleton("P ∗-∗ Q").kind == "wand_iff"
-    # ↔ / ∗-∗ / ⊣⊢ are level 95, below -∗ / → at 99 (v1 put them on one level).
+    # ↔ / ∗-∗ / ⊣⊢ are level 95, below -∗ / → at 99 (not one shared level).
     assert shape(parse_skeleton("P ↔ Q -∗ R")) == shape(parse_skeleton("(P ↔ Q) -∗ R"))
     assert shape(parse_skeleton("P ∗-∗ Q → R")) == shape(parse_skeleton("(P ∗-∗ Q) → R"))
     assert parse_skeleton("P ⊣⊢ Q ∗ R").kind == "equiv"
@@ -184,3 +184,9 @@ def test_peel_and_splittable() -> None:
 def test_json_round_trip() -> None:
     node = parse_skeleton("∃ x, ⌜x = 3⌝ ∗ ▷ (P ∨ Q)")
     assert shape(Skel.from_json(node.to_json())) == shape(node)
+
+
+def test_parse_skeleton_is_total_under_deep_nesting() -> None:
+    assert parse_skeleton("(" * 3000 + "P" + ")" * 3000).kind == "atom"
+    assert parse_skeleton(" ∗ ".join(["P"] * 5000)).kind == "atom"
+    assert parse_skeleton("▷ " * 5000 + "P").kind == "atom"

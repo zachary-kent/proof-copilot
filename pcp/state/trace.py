@@ -159,7 +159,7 @@ def _infer_rec(d: dict[str, Any]) -> str:
 
     A step always carries ``state_id``/``goals``; an event always carries ``kind`` and
     never those -- so an old event line lacking ``confidence`` is still an event, not
-    a ``Step`` read that dies on ``KeyError('state_id')`` (legacy bug).
+    a ``Step`` read that dies on ``KeyError('state_id')``.
     """
     if "props" in d:
         return "header"

@@ -7,7 +7,7 @@ Order of the checks, cheapest first, and why each exists:
 
 1. **static body checks** -- the body is validated *as a proof body by construction*
    (:func:`pcp.rocq.body.validate_body`: tactic sentences only, an allowlist of
-   harmless queries) and each violation is filed under the legacy check name it
+   harmless queries) and each violation is filed under the numbered check it
    belongs to.  No denylist: ``Qed.``/``Abort.`` in a body, ``Set Nested Proofs
    Allowed``, ``Unset Guard Checking``, a global ``Notation`` -- all rejected
    whether or not they start a line, and comments are stripped by the real lexer;
@@ -214,8 +214,8 @@ def escape_hatch(code: str) -> str | None:
     """Why a vernacular sentence is an escape hatch (item 6), or ``None``.
 
     Modifiers are skipped first: ``Local Unset Guard Checking.`` is the same hatch as
-    ``Unset Guard Checking.``, and looking at the first word alone let it through the
-    design-mode fragment scan (review finding).
+    ``Unset Guard Checking.``; looking at the first word alone would let it through the
+    design-mode fragment scan.
     """
     head, nxt = _declaration_head(code)
     if head in ("Set", "Unset"):
@@ -232,7 +232,7 @@ def escape_hatch(code: str) -> str | None:
 
 
 def _check_for(v: Violation) -> str:
-    """Which legacy check a body violation belongs to."""
+    """Which numbered check a body violation belongs to."""
     if v.reason.startswith("`Set`/`Unset`"):
         return CHECK_ESCAPE if escape_hatch(v.sentence) else CHECK_NO_ADMIT
     if v.reason.startswith("vernacular command"):
@@ -247,8 +247,7 @@ def _check_for(v: Violation) -> str:
 def static_checks(bodies: dict[str, str], *, admitted: Iterable[str] = ()) -> list[Check]:
     """Checks 1-3 over ``{node: body}``, decided by reading the bodies alone.
 
-    Built on :func:`validate_body`, so the names are the legacy ones but the
-    decision is structural: anything that is not a tactic sentence is rejected.
+    Built on :func:`validate_body`, so the decision is structural: anything that is not a tactic sentence is rejected.
     ``admitted`` names bodies that end in ``Admitted`` (design mode): ``admit`` is
     not an offence there, but every vernacular sentence still is.
     """
@@ -488,7 +487,7 @@ class Gate:
         started = time.perf_counter()
         blocks = parse_blocks(candidate_text)
         # Every script body, Admitted ones included: an ``Unset Universe Checking``
-        # inside an admitted helper is global state, not a proof (review finding).
+        # inside an admitted helper is global state, not a proof.
         bodies = {_block_key(b): b.body(candidate_text) for b in blocks if b.kind == "script"}
         admitted = [_block_key(b) for b in blocks if b.kind == "script" and b.ender not in ("Qed", "Defined")]
         checks = static_checks(bodies, admitted=admitted)

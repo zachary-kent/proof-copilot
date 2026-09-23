@@ -100,7 +100,7 @@ def test_non_json_lines_are_kept_not_dropped() -> None:
 
 
 def test_friction_is_recorded_only_for_executing_tools() -> None:
-    """Reading a file that says ``Error:`` is not a failed call (legacy bug 13)."""
+    """Reading a file that says ``Error:`` is not a failed call."""
     text = "\n".join([
         assistant("m1", tool_use("t1", "Bash", {"command": "pcp check"}), tool_use("t2", "Read", {"file_path": "failures.py"})),
         tool_result("t1", "File \"./node.v\", line 3\nError: The reference foo was not found.\n\nnext"),

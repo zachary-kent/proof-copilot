@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from pcp.config import env as penv
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRATCH = ROOT / "eval" / "corpus" / "scratch"
 CANARY = ROOT / "eval" / "corpus" / "canary"
@@ -21,21 +23,41 @@ GOLDENS = ROOT / "tests" / "goldens" / "ipm_states.jsonl"
 
 
 def rocq_available() -> bool:
-    return bool(os.environ.get("PCP_COQC") or shutil.which("coqc") or shutil.which("rocq"))
+    """The lookup pcp itself uses: ``PCP_COQC``, ``PATH``, then the pinned opam switch."""
+    return penv.coqc_binary() is not None
 
 
 def petanque_available() -> bool:
-    return bool(os.environ.get("PCP_PET") or shutil.which("pet") or shutil.which("pet-server"))
+    return penv.petanque_available()
 
 
 def bwrap_available() -> bool:
     return bool(os.environ.get("PCP_BWRAP") or shutil.which("bwrap"))
 
 
-needs_rocq = pytest.mark.skipif(not rocq_available(), reason="no Rocq toolchain (run ./scripts/setup-toolchain.sh)")
-needs_petanque = pytest.mark.skipif(not petanque_available(), reason="no petanque binary")
+#: Markers, not bare skips: ``-m "not rocq and not petanque"`` deselects these tests, and
+#: ``pytest_collection_modifyitems`` skips them when the toolchain is missing.
+needs_rocq = pytest.mark.rocq
+needs_petanque = pytest.mark.petanque
 needs_bwrap = pytest.mark.skipif(not bwrap_available(), reason="no bubblewrap")
 needs_goldens = pytest.mark.skipif(not GOLDENS.exists(), reason="no golden corpus (python eval/extract_goldens.py)")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items) -> None:
+    """Mark every test that needs the shared pet-server (the ``pool`` fixture) as
+    ``petanque``, then skip ``rocq``/``petanque`` tests whose toolchain is missing.
+    Runs before ``-m`` deselection so the fixture-derived marker is honoured."""
+    skips = {
+        "rocq": None if rocq_available() else pytest.mark.skip(reason="no Rocq toolchain (run `pcp setup`)"),
+        "petanque": None if petanque_available() else pytest.mark.skip(reason="no petanque binary"),
+    }
+    for item in items:
+        if "pool" in getattr(item, "fixturenames", ()) and item.get_closest_marker("petanque") is None:
+            item.add_marker(pytest.mark.petanque)
+        for name, skip in skips.items():
+            if skip is not None and item.get_closest_marker(name) is not None:
+                item.add_marker(skip)
 
 
 @pytest.fixture(scope="session")

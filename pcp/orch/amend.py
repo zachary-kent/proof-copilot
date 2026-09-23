@@ -158,7 +158,7 @@ def audit_rung(node: Node, amendment: Amendment, impact: ImpactReport) -> Rung:
 
 def mentions(statement: str, name: str) -> bool:
     """Whether ``statement`` refers to ``name`` as an identifier -- ``inv`` is not a
-    reference in ``invariant_holds`` (the legacy substring test said it was)."""
+    reference in ``invariant_holds``."""
     return name in identifiers(strip_comments(statement))
 
 
@@ -242,8 +242,8 @@ def reopen_for_amendment(graph: Graph, nodes: list[Node], *, definition: str, de
 
 def refutation_statement(statement: str) -> str:
     """``Lemma X__refutation <binders> : (<prop>) -> False.`` -- the binders are kept,
-    because a proposition with unbound variables cannot typecheck and the legacy
-    probe dropped them, so no refutation could ever check."""
+    because a proposition with unbound variables cannot typecheck, so without them no
+    refutation could ever check."""
     head, binders, ty = split_head(statement)
     if not head:
         raise UsageError("cannot refute a statement with no top-level colon")

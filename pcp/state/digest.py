@@ -7,14 +7,13 @@ Three jobs, all pure functions over printed props:
 * **Select.**  The ``select`` grammar of ``pcp state`` / ``proof_state`` (contract 1.8):
   id globs, classes, ``mentions:<tok>``, ``head:<sym>``.  A hypothesis named
   *explicitly* (glob / mentions / head) is reported as such so the renderer can let an
-  explicit request beat every demotion (legacy bug: ``select="Hinv"`` under
-  ``diff_only`` rendered nothing).
+  explicit request beat every demotion (``select="Hinv"`` under ``diff_only``
+  still renders ``Hinv``).
 * **Fold.**  ``render_prop`` folds only in the modes whose point is folding.  ``full``
-  never folds: the legacy renderer folded every 5-line prop in every mode, so a wrapped
-  invariant could never be displayed at all.
+  never folds, so a wrapped invariant can always be displayed in full.
 
-Hashes are the full 128-bit ``props.prop_hash`` (the legacy 32-bit truncation merged
-distinct props silently); ``fold_id`` shortens them for display only.
+Hashes are the full 128-bit ``props.prop_hash`` (a truncated hash would merge distinct
+props silently); ``fold_id`` shortens them for display only.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ from pcp.state.ipm.skeleton import parse_skeleton
 from pcp.state.props import prop_hash
 
 Mode = Literal["full", "folded", "summary", "hash-only"]
-MODES: tuple[str, ...] = ("full", "folded", "summary", "hash-only")
 
 #: Chars per token.  Deterministic and dependency-free; stability matters more than accuracy.
 CHARS_PER_TOKEN = 4
@@ -318,8 +316,8 @@ def head_symbol(prop: str) -> str:
     """The head symbol of a printed prop: ``WP`` for a WP goal, ``↦`` for ``l ↦ v``,
     ``own`` for ``own γ x``, ``∗`` for a separating conjunction.
 
-    The legacy heuristic headed ``l ↦ v`` as ``l`` and a whole WP goal as one atom, so
-    the relevance filter demoted every spatial hypothesis of every WP goal.
+    Heading ``l ↦ v`` as ``l`` or a WP goal as one atom would make the relevance filter
+    demote every spatial hypothesis of every WP goal.
     """
     text = prop.strip()
     if not text:

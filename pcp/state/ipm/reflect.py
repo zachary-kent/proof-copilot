@@ -1,4 +1,4 @@
-"""The reflected dump: build and drive ``coq/IDump.v`` (PLAN.md 3.1, the primary path).
+"""The reflected dump: build and drive ``IDump.v`` (PLAN.md 3.1, the primary path).
 
 The Ltac2 ``iDump`` matches ``envs_entails (Envs Γp Γs c) Q``, walks both contexts and
 prints one ``PCP1<TAB>klass<TAB>name<TAB>prop`` message per entry; petanque returns each
@@ -14,7 +14,8 @@ name yields a ``missing`` record with body ``True``; only the focused goal is du
 The build goes into ``<root>/pcp/IDump.vo`` and is loaded through ``pre_commands`` with
 ``Require Import pcp.IDump.`` and a ``ROCQPATH``/``COQPATH`` that contains ``root`` --
 the worker's file is never edited.  ``Tracer`` uses this path first and the printer
-parser (``parse.py``) as the fallback for a step without ``PCP1`` records.
+parser (``parse.py``) as the fallback for a step without ``PCP1`` records.  The source
+ships as ``pcp/assets/coq/IDump.v`` (:mod:`pcp.util.assets`), so a wheel has it too.
 """
 
 from __future__ import annotations
@@ -30,9 +31,9 @@ from pcp.errors import ToolchainError, UsageError
 from pcp.state.ipm.model import Hyp, IrisGoal, scan_modality
 from pcp.state.petanque import StateHandle
 from pcp.state.session import ProofSession
+from pcp.util.assets import idump_path
 from pcp.util.hashing import content_hash
 from pcp.util.io import atomic_write_text, read_text
-from pcp.util.paths import repo_root
 from pcp.util.proc import run
 
 MARKER = "PCP1\t"
@@ -45,12 +46,9 @@ BUILD_TIMEOUT = 600.0
 
 
 def idump_source() -> Path:
-    """``coq/IDump.v`` from the checkout, else the copy shipped as package data."""
-    candidates = [repo_root() / "coq" / "IDump.v", Path(__file__).resolve().parents[1] / "IDump.v"]
-    for c in candidates:
-        if c.exists():
-            return c
-    raise ToolchainError("coq/IDump.v is missing from this installation; the reflected dump is unavailable")
+    """The packaged ``IDump.v``; :class:`~pcp.util.assets.MissingAsset` (a
+    ``ToolchainError``) on a broken install."""
+    return idump_path()
 
 
 @contextlib.contextmanager
@@ -66,16 +64,16 @@ def _build_lock(pkg: Path) -> Iterator[None]:
 def build_idump(root: Path) -> Path:
     """Compile ``IDump.v`` into ``<root>/pcp/IDump.vo`` (``root`` absolute, given by the caller).
 
-    The cache key covers the source *and* the compiler's version banner (v1 keyed on the
-    source only and reused a ``.vo`` from an older Rocq); the build runs under a file
-    lock so concurrent ``proof_open(reflect=True)`` calls cannot race on the ``.vo``.
+    The cache key covers the source *and* the compiler's version banner, so a ``.vo``
+    built by an older Rocq is never reused; the build runs under a file lock so
+    concurrent ``proof_open(reflect=True)`` calls cannot race on the ``.vo``.
     """
     root = Path(root)
     if not root.is_absolute():
         raise UsageError(f"build_idump needs an absolute root, got {root}")
     coqc = penv.coqc_binary()
     if coqc is None:
-        raise ToolchainError("no coqc/rocq on PATH; the reflected dump is unavailable")
+        raise ToolchainError("no coqc/rocq on PATH or in the pinned switch (run `pcp setup`); the reflected dump is unavailable")
     pkg = root / LOGICAL_ROOT
     pkg.mkdir(parents=True, exist_ok=True)
     source = read_text(idump_source())
@@ -141,8 +139,8 @@ def _clean_name(raw: str) -> tuple[str, bool]:
 def clean_body(raw: str) -> str:
     """Join a wrapped prop and drop the printer's ``( ... )%I`` scope wrapper.
 
-    Only the *outermost* parentheses go, and only when they enclose the whole body:
-    ``(A)%I ∗ (B)%I`` stays as it is (v1's greedy regex mangled it).
+    Only the *outermost* parentheses go, and only when they enclose the whole body,
+    so ``(A)%I ∗ (B)%I`` stays as it is.
     """
     text = "\n".join(line.rstrip() for line in raw.splitlines()).strip()
     if text.endswith("%I") and _outer_parens(text[:-2]):

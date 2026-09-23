@@ -5,7 +5,7 @@ statements freeze immediately, with only the free sentinels.  What the freeze
 guarantees here, by construction rather than by later cleanup:
 
 * the root is inserted **first**, so a plan that restates it can never collide with
-  it (the legacy build crashed with an ``IntegrityError`` on a fresh graph);
+  it (no ``IntegrityError`` on a fresh graph);
 * a child that restates the root, a declaration already in the file, or another
   child is a *blocking* sentinel hit and is not inserted -- it would otherwise be
   frozen, dispatched and demanded by integration forever;
@@ -205,8 +205,8 @@ def _reconcile_child(
 
 def _gate_plan_body(plan: PlanContext, anchor: str, spec: NodeSpec, *, whitelist: Iterable[str]) -> None:
     """A plan-supplied proof is checked the way a worker's would be, before it enters
-    the graph as ``gated`` -- the legacy build trusted it, and a bad plan body then
-    broke every child's packet and gate (bugs-pipeline: prove.py:188)."""
+    the graph as ``gated`` -- a trusted bad plan body would break every child's packet
+    and gate."""
     gate = Gate(plan.dev, extra_whitelist=tuple(whitelist))
     others = [NodeSpec(s.name, s.statement, None, s.mockable, s.transparent) for s in plan.specs if s.name != spec.name]
     result = gate.run(

@@ -11,7 +11,7 @@ Everything the orchestrator does is one procedure::
         for c in plan.children, in parallel: prove(c, share of B)
 
 The daily loop is depth-1 with a human (or one decomposer) at the root; depth > 1
-is Phase 7 material and stays behind ``config.flag("recursive_decomposition")``:
+is speculative and stays behind ``config.flag("recursive_decomposition")``:
 every function here that would *decide* to recurse says no while the flag is off,
 so nothing speculative can reach the canary's critical path (ARCHITECTURE.md §3
 rule 8).  What is built: the difficulty heuristic (to pick a probe budget, never to

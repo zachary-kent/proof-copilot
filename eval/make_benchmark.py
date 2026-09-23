@@ -422,8 +422,8 @@ class Declaration:
 def split_declaration(block: ProofBlock) -> Declaration:
     """Take a declaration statement apart without ever matching the name as a substring.
 
-    The legacy ``head.split(name, 1)`` found ``fin`` inside the keyword ``Definition``;
-    here the name is located *after* the head keyword the parser already identified.
+    A ``head.split(name, 1)`` would find ``fin`` inside the keyword ``Definition``;
+    the name is located *after* the head keyword the parser already identified.
     """
     if block.name is None:
         raise UsageError("an anonymous declaration cannot be taken apart by name")
@@ -539,9 +539,9 @@ def _tag(name: str, salt: str) -> str:
 def rename_text(text: str, mapping: dict[str, str]) -> str:
     """Rename whole identifiers, in one pass, longest name first.
 
-    The boundary treats ``'`` as part of an identifier: ``\\bread'\\b`` never matched
-    ``read'`` (no word character follows a prime) while ``read`` matched *inside* it,
-    so primed names survived every legacy build with their prefix renamed.  ``\\w`` is
+    The boundary treats ``'`` as part of an identifier: ``\\bread'\\b`` never matches
+    ``read'`` (no word character follows a prime) while ``read`` matches *inside* it,
+    so primed names would survive with their prefix renamed.  ``\\w`` is
     Unicode-aware, so ``γₕ`` and ``γᵥ`` are identifiers too.  One alternation pass
     means a pseudonym produced for one name can never be renamed again as another.
     """
@@ -628,8 +628,8 @@ def definition_types(source: str, names: list[str], *, timeout: float = COMPILE_
     Blanking a body also destroys type inference: ``value γ n`` had ``γ : gname`` only
     because the body applied ``ghost_var`` to it, so the stub must carry the signature
     the original never wrote down.  A failed probe is an error, not an empty answer:
-    the legacy returned ``{}`` and the failure surfaced later as an unrelated type
-    error in the final verify.
+    returning ``{}`` would surface the failure later as an unrelated type error in
+    the final verify.
     """
     blocks = _named_blocks(source)
     qualified = {(blocks[n].qualified_name or n) if n in blocks else n: n for n in names}
@@ -760,7 +760,7 @@ def drop_declarations(source: str, names: list[str]) -> tuple[str, list[str]]:
     shape exists; for design a worker is supposed to invent, the honest scrub is
     deletion -- and the comments above it go too: a comment explaining an invariant
     describes the answer as surely as the invariant does.  The whole stacked block is
-    taken (the legacy dropped only the last comment of a stack).
+    taken, not only the last comment of a stack.
     """
     blocks = _named_blocks(source)
     missing = [n for n in names if n not in blocks]
@@ -802,7 +802,7 @@ def set_imports(source: str, imports: list[str]) -> str:
 
     ``From iris.base_logic.lib Require Import token ghost_var`` names three quarters
     of the ghost-state plan.  Sentences come from the lexer, so a ``Require`` wrapped
-    over several lines (the legacy one-line regex left those in place) and one with
+    over several lines and one with
     dotted module names go too.
     """
     lines = [ln if ln.strip().endswith(".") else ln.strip() + "." for ln in imports]
@@ -834,7 +834,7 @@ def minimize_class(source: str, name: str, fields: list[str]) -> str:
     A ``Class rwcasG Σ`` listing ``inG Σ requestRegUR``, ``tokenG Σ`` and two
     ``ghost_varG`` instances *is* the ghost-state design.  The body is found by
     bracket matching, so a field whose type contains braces (``{[ ... ]}``) does not
-    end it early and no old field survives after the rewrite.
+    end it early and no old field survives the reduction.
     """
     block = _named_blocks(source, heads=("Class",)).get(name)
     if block is None:

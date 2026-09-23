@@ -10,8 +10,8 @@ something occasionally fails to earn its place.
 
 An arm is a *value* (tools + skill) and nothing else.  The runner for an arm is built
 from that value by ``eval/harness.py`` -- one runner per arm, never one runner for the
-whole ladder -- which is what makes the legacy "control arm launched with every other
-arm's MCP tools" bug impossible rather than fixed (bugs-dash-eval: harness.py:349).
+whole ladder -- so the control arm can never be launched with another arm's MCP
+tools.
 
 The number that decides whether the orchestration thesis pays is the *cheap-model*
 solve rate, not the frontier one -- a frontier model that solves everything unaided
@@ -29,8 +29,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pcp.mcp.names import STATE_TOOLS  # noqa: E402
-from pcp.util.io import read_text  # noqa: E402
-from pcp.util.paths import repo_root  # noqa: E402
+from pcp.util.assets import skill_text  # noqa: E402
 
 #: A rung must move the solve rate by more than this to keep its context.
 EARNS_THRESHOLD_PT = 2.0
@@ -39,7 +38,7 @@ PROVER_SKILL = "prover.md"
 
 @dataclass(frozen=True)
 class Ablation:
-    """One rung: the state tools granted and the skill file (under ``skills/``) shown.
+    """One rung: the state tools granted and the packaged skill file (``pcp/assets/skills/``) shown.
 
     ``skill`` is a file *name*, not its text, so the value is comparable and printable;
     :meth:`skill_texts` reads it when a packet is built.
@@ -54,12 +53,12 @@ class Ablation:
         if unknown:
             raise ValueError(f"{self.name}: unknown state tool(s) {', '.join(unknown)}")
 
-    def skill_texts(self, root: Path | None = None) -> list[str]:
-        """The skill's text, for ``ProveConfig.skills``; ``[]`` when none or absent."""
+    def skill_texts(self) -> list[str]:
+        """The skill's text, for ``ProveConfig.skills``; ``[]`` when none.  A named skill
+        that is missing raises (an arm silently run without its skill measures nothing)."""
         if not self.skill:
             return []
-        path = (root or repo_root()) / "skills" / self.skill
-        return [read_text(path)] if path.exists() else []
+        return [skill_text(self.skill)]
 
     def adds(self, previous: Ablation | None) -> str:
         """What this rung grants beyond ``previous`` -- the thing its delta measures."""
@@ -132,8 +131,9 @@ def deltas(metrics: Sequence[Any]) -> str:
 
     Takes ``Metrics`` objects or their ``to_json()`` rows.  Solve rates are over the
     tasks that were *measured*: an arm whose every task errored (a missing binary, a
-    revoked login) has no rate and no verdict, because "0 % because claude was not on
-    PATH" printed ``DOES NOT EARN ITS CONTEXT`` in the legacy harness.
+    revoked login) has no rate and no verdict, so a run where the tool was never
+    actually exercised -- "0 % because claude was not on PATH" -- cannot print
+    ``DOES NOT EARN ITS CONTEXT``.
     """
     by_name = {str(_row(m)["ablation"]): _row(m) for m in metrics}
     lines: list[str] = []

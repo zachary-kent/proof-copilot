@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import _ipm_standin  # noqa: F401  -- installs skeleton/pattern stand-ins when absent
-
 from pcp.state.digest import (
     PropStore,
     Selector,
@@ -24,7 +22,7 @@ def test_store_keeps_first_spelling_and_full_hashes() -> None:
     h1 = store.put("P ?Goal3")
     h2 = store.put("P  ?Goal7")
     assert h1 == h2 and store.get(h1) == "P ?Goal3"
-    assert len(h1.split(":")[1]) == 32, "128-bit hashes, not the legacy 32-bit truncation"
+    assert len(h1.split(":")[1]) == 32, "128-bit hashes, never a 32-bit truncation"
     assert PropStore.from_json(store.to_json()).get(h1) == "P ?Goal3"
 
 

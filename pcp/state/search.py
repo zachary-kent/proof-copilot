@@ -427,7 +427,7 @@ def tactics_for(text: str) -> list[str]:
     """Offline: the IPM tactic shortlist for a printed shape, by *standalone* connective.
 
     Driven by the skeleton's top connective first, then by space-delimited tokens, so
-    the ``∗`` inside ``-∗``, ``∗-∗`` and ``l ↦∗ vs`` never suggests ``iSplitL`` (legacy bug).
+    the ``∗`` inside ``-∗``, ``∗-∗`` and ``l ↦∗ vs`` never suggests ``iSplitL``.
     """
     if not text.strip():
         return []

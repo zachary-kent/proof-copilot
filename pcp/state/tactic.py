@@ -25,11 +25,6 @@ class Token:
     text: str
     start: int
 
-    @property
-    def is_lemma_term(self) -> bool:
-        """A parenthesised application or a bare identifier: a lemma, not a hypothesis."""
-        return (self.kind == "group" and self.text.startswith("(")) or self.kind == "word"
-
 
 @dataclass(frozen=True)
 class AsClause:

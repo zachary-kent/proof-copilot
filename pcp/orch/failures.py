@@ -4,15 +4,14 @@ A solve rate is a number; a failure taxonomy is a work queue.  Classification is
 deterministic and honest about its limits: anything it cannot place lands in
 ``unclassified`` rather than being forced into the nearest bucket.
 
-What changed from the legacy classifier, and why (each is a bug in
-``SCRATCH/bugs-orch-core.md``):
+The rules, and why:
 
 * the runner's exit status, ``NodeResult.status == "error"`` and a gate that could
   not run are **first-class inputs**, not regex targets -- so a compile error on
   line 401 is a compile error and a sandbox that failed to start is not a stuck
   worker (``runner-error``);
-* every regex is anchored or word-bounded: ``Resolve`` no longer matches
-  ``unresolved``, ``AU`` no longer matches ``au``;
+* every regex is anchored or word-bounded: ``Resolve`` does not match
+  ``unresolved``, ``AU`` does not match ``au``;
 * ``gate-violation`` fires only on a ``[FAIL]`` line of a gate report, never on the
   check *names*, which every report prints;
 * the gate's own compile timeout is infrastructure, never the worker's ``deadline``;
@@ -201,10 +200,6 @@ def _is_a_directory_listing(text: str) -> bool:
 class Finding:
     klass: str
     evidence: str = ""
-
-    @property
-    def description(self) -> str:
-        return TAXONOMY.get(self.klass, "")
 
     def to_json(self) -> dict[str, str]:
         return {"klass": self.klass, "evidence": self.evidence}

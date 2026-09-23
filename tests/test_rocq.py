@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
+
+import pytest
+
+from pcp.errors import UsageError
 from pcp.rocq.assemble import (
     PROOF_USING_DIRECTIVE,
     Development,
@@ -13,10 +18,11 @@ from pcp.rocq.assemble import (
     plan_preamble,
     stub_proof_bodies,
 )
-from pcp.rocq.assumptions import classify_assumptions, parse_assumptions, trailer
+from pcp.rocq.assumptions import Assumption, classify_assumptions, parse_assumptions, trailer
 from pcp.rocq.body import is_placeholder, strip_proof_wrapper, validate_body
 from pcp.rocq.decls import find_block, parse_blocks, scopes_at
 from pcp.rocq.lexer import identifiers, split_sentences, strip_comments
+from pcp.rocq.project import compile_text, coq_project_flags
 from pcp.rocq.statement import (
     normalize_statement,
     remove_binder,
@@ -24,6 +30,7 @@ from pcp.rocq.statement import (
     statement_binders,
     statement_hash,
 )
+from tests.conftest import needs_rocq
 
 
 def test_bullets_after_comments_and_selector_braces_are_their_own_sentences():
@@ -138,3 +145,48 @@ def test_assembly_spans_point_at_bodies(canary_dir):
         block = next(x for x in parse_blocks(asm.text) if x.name == name)
         assert (block.body_start, block.body_end) == (a, b)
     assert asm.text.rstrip().endswith("End canary.") and asm.open_scopes[0].name == "canary"
+
+
+def test_whitelist_matching_is_component_wise():
+    wl = {"Classical_Prop.classic", "JMeq_eq"}
+    ok, _, bad = classify_assumptions(
+        [Assumption("classic"), Assumption("Stdlib.Logic.Classical_Prop.classic"), Assumption("Evil.classic"), Assumption("M.JMeq_eq")],
+        whitelist=wl, stubs=set(),
+    )
+    assert [a.name for a in ok] == ["classic", "Stdlib.Logic.Classical_Prop.classic", "M.JMeq_eq"]
+    assert [a.name for a in bad] == ["Evil.classic"]
+    _, leaning, bad = classify_assumptions([Assumption("Outer.Inner.stub"), Assumption("Other.stub")], whitelist=set(), stubs={"Inner.stub"})
+    assert [a.name for a in leaning] == ["Outer.Inner.stub"] and [a.name for a in bad] == ["Other.stub"]
+
+
+def test_strip_proof_wrapper_tolerates_comments_around_the_wrapper():
+    assert strip_proof_wrapper("(* strategy *)\nProof.\n iFrame.\nQed. (* done *)") == "iFrame."
+    assert strip_proof_wrapper("Proof with auto.\n iFrame.\nQed.") == "iFrame."
+    assert strip_proof_wrapper("Proof (I).") == "Proof (I)."
+    assert strip_proof_wrapper("exact I. Qed. Lemma d : True. Proof. exact I.") == "exact I. Qed. Lemma d : True. Proof. exact I."
+    assert strip_proof_wrapper("Qed.") == "" and strip_proof_wrapper("") == ""
+
+
+def test_coqproject_quoting_and_comments(tmp_path):
+    (tmp_path / "_CoqProject").write_text('-Q . dev  # the library\n# -Q secret hidden\n-arg "-w -deprecated"\n-arg -w -arg -notation-overridden\nDev.v\n')
+    assert coq_project_flags(tmp_path) == ["-Q", ".", "dev", "-w", "-deprecated", "-w", "-notation-overridden"]
+
+
+@needs_rocq
+def test_a_rocq_binary_is_invoked_as_rocq_compile(tmp_path, monkeypatch):
+    rocq = shutil.which("rocq")
+    if rocq is None:
+        pytest.skip("no rocq front end")
+    monkeypatch.setenv("PCP_COQC", rocq)
+    res = compile_text("Lemma t : True. Proof. exact I. Qed.\n", filename="T.v", root=tmp_path)
+    assert res.ok, res.output
+    assert res.argv[:2] == [rocq, "compile"]
+
+
+def test_plan_preamble_refuses_scopes_and_parse_plan_refuses_definitions():
+    assert plan_preamble("From iris Require Import base.\n(* c *)\nLocal Open Scope Z_scope.\nLemma c : True.\nProof. Admitted.\n") == "From iris Require Import base.\nLocal Open Scope Z_scope."
+    with pytest.raises(UsageError, match="opens a scope"):
+        plan_preamble("From iris Require Import base.\nSection p.\nContext (x : nat).\nLemma c : True.\nProof. Admitted.\n")
+    with pytest.raises(UsageError, match="not an obligation"):
+        parse_plan("Definition helper := 0.\nLemma c : helper = 0.\nProof. Admitted.\n")
+    assert [s.name for s in parse_plan("Lemma a : True.\nProof. Admitted.\nTheorem b : True.\nProof. exact I. Qed.\n")] == ["a", "b"]

@@ -1,11 +1,12 @@
-d# proof-copilot — architecture (v2, September 2026)
+d# proof-copilot — architecture
 
-This is the rewrite of the original implementation (git `40d5b0b`). The *design* is unchanged
-and lives in [`PLAN.md`](PLAN.md); this document says how the code is organised, what the
-layers may depend on, and the engineering rules every module follows. If the two disagree,
-PLAN.md wins on *what* and this file wins on *how*.
+How the code is organised, what the layers may depend on, the engineering rules every module
+follows, and what is built (§12). The rationale behind the design is the design record,
+[`design/PLAN.md`](design/PLAN.md), which code comments cite by section ("PLAN.md 8.7"); where
+it and the code disagree, this file and the code are authoritative. Using the tool is the
+[README](../README.md).
 
-Two products still live here, still separable:
+Two products live here, separable:
 
 - **pcp-state** (`pcp.state`, `pcp.mcp`): the Iris-aware proof-state layer over Rocq/petanque.
 - **pcp-orch** (`pcp.orch`): the obligation-graph orchestrator, whose daily loop (`pcp prove`)
@@ -14,7 +15,8 @@ Two products still live here, still separable:
 ## 1. Layers and the import rule
 
 ```
-pcp.util      stdlib only.                                  (proc, io, text, hashing, paths, locks)
+pcp.util      stdlib only.                                  (proc, io, text, hashing, paths, locks, assets)
+pcp.assets    data, no code                                 skills, IDump.v, setup script + pins
 pcp.config    ← util                                        (schema, load, flags, providers, env)
 pcp.rocq      ← util, config                                Rocq *text* and the coqc path. NO petanque.
 pcp.state     ← util, config, rocq                          petanque, IPM model, ledger, render, search
@@ -28,6 +30,10 @@ eval/         ← orch, state (scripts; not part of the package)
 `tests/test_layering.py` enforces this by importing each package in a subprocess and checking
 `sys.modules`. Lazy imports inside functions are allowed only across the `cli` boundary and
 for optional third-party packages (`pytanque`, `mcp`, `anthropic`).
+
+Packaged files are read only through `pcp.util.assets` (`importlib.resources`), never by a
+path relative to a checkout: there is no "repo root", because an installed package has none
+(§11).
 
 ## 2. Package layout
 
@@ -44,11 +50,19 @@ pcp/
                        slug(), ensure_dir, rm_tree
     text.py            one_line, tail_lines, clip, indent, wrap
     hashing.py         blake2b content hashes with prefixes (b:/s:/c:/h:/p:/e:)
-    paths.py           repo_root() (from package), workspace(), resolve_from(cwd)
+    paths.py           resolve_from(path, base), home(), tmpdir() -- deliberately no repo root
     locks.py           RunLock (fcntl flock on <graph>.lock); holder pid + started_at
+    assets.py          the packaged files (skill, IDump.v, setup script, toolchain_pins());
+                       a missing asset is an error, never an empty default
+  assets/
+    skills/*.md        worker norms: prover, decomposer, invariants, logatom
+    coq/IDump.v        the Ltac2 reflected IPM dump
+    setup-toolchain.sh `pcp setup`'s opam script
+    toolchain.env      the version pins -- the single source (env.sh, doctor, env, setup)
   config/
     env.py             every environment variable name in one place + lookups
-                       (coqc_binary, pet_binary, pet_server_binary, bwrap_binary, library_roots)
+                       (coqc_binary, pet_binary, pet_server_binary, bwrap_binary, library_roots);
+                       the pinned-switch fallback (opam_root, switch_prefix, with_switch_path)
     flags.py           DEFAULT_FLAGS (all off)
     schema.py          Config dataclass (tiers, providers, effort, flags, concurrency,
                        axiom_whitelist) + validation
@@ -93,6 +107,8 @@ pcp/
     search.py          premise_search (quoted substrings), notation_resolve
     diagnose.py        pattern/apply/leftover/mask diagnosis by construction
     explain.py         `pcp check` replay diagnosis (char offsets, warnings ignored)
+    props.py           evar-aware prop normalisation and content hashing
+    tactic.py          one tactic sentence as tokens (head, quoted names, `as` clause)
   mcp/
     names.py           TOOLS (10), MAX_TOOLS (12), STATE_TOOLS, mcp_tool_name, blurbs
     server.py          PcpServer (transport-free, locked) + register() for mcp 1.x/2.x
@@ -129,8 +145,9 @@ pcp/
     prove/integrate.py integrate(), export_solution
     prove/resume.py    reopen_incomplete (salvage gated bodies from attempts), RunLock
   dash/serve.py, dash/report.py, dash/dashboard.html
-  cli/main.py          parser + dispatch only; cli/<command>.py per subcommand;
-                       cli/runners.py (runner selection, model flags)
+  cli/main.py          parser + dispatch only; cli/cmd_<command>.py per subcommand
+                       (cmd_setup: `pcp setup`/`pcp env`; cmd_init: `pcp init`);
+                       cli/runners.py (runner selection, model flags, sandbox choice)
 ```
 
 ## 3. Rules every module follows
@@ -199,6 +216,8 @@ fragment, and hoisted preamble vernacular is scanned too.
 
 ## 7. What changed from v1, deliberately
 
+v1 is the original implementation (git `40d5b0b`); this tree is a from-scratch rewrite of it.
+
 - `pcp.core` → `pcp.rocq` + `pcp.state`; `pcp.orch.prove` is a package; the CLI is one file
   per command. Module names referenced by docs and tests are updated accordingly.
 - The graph schema is versioned (`schema_version = 2`) with a migration from v1 that keeps
@@ -229,7 +248,7 @@ classes, and each class is precluded by a structural rule rather than a fix:
 
 Everything else is a plain bug with a regression test.
 
-## 9. Incremental amendments and adjudication (added 2026-09-05)
+## 9. Incremental amendments and adjudication
 
 A prover that discovers mid-proof that a definition lacks a fact does not contest the statement; it
 asks. `answer.json` may carry `amendments: [{definition, add | replace, at, why}]` on a `stuck` (or
@@ -285,10 +304,10 @@ before anything looked at its statement). Approver attempts are recorded under r
 count as design rounds.
 
 
-## 10. Durability of the run (added 2026-09-05)
+## 10. Durability of the run
 
-State was durable from the start (the graph is the record; a run resumes, salvages gated bodies and
-keeps attempts bounded). The *run* is now durable too (`pcp/orch/outage.py`, `supervise.py`,
+State is durable (the graph is the record; a run resumes, salvages gated bodies and keeps
+attempts bounded), and so is the *run* (`pcp/orch/outage.py`, `supervise.py`,
 `prove/resume.py`):
 
 - **Outage pause.** A worker, decomposer or approver attempt that fails for a provider reason
@@ -304,3 +323,115 @@ keeps attempts bounded). The *run* is now durable too (`pcp/orch/outage.py`, `su
   crash with backoff (`--max-restarts`, default 20), logs to the record directory, and stops on a
   normal return. SIGTERM kills the child's process group and leaves the graph resumable.
 - **Ladder resume.** `eval/ladder.py --resume STAMP` continues wall-killed rungs from their graphs.
+
+
+## 11. Installation: a checkout and an installed copy behave the same
+
+`pcp` runs from a checkout's `.venv` or from a `uv tool`/`pipx` install, and nothing may depend
+on which (`tests/test_install.py` builds a wheel, installs it non-editable in a fresh venv, and
+loads every asset from it; `make install-check`).
+
+- **Assets.** Everything a run needs besides Python is under `pcp/assets/` and read through
+  `pcp.util.assets`. A missing asset raises `MissingAsset`, because the v1 checkout-relative
+  lookup silently found nothing in an installed copy and workers ran without their skill file.
+- **Toolchain.** `pcp setup` runs the packaged `setup-toolchain.sh`, which sources
+  `toolchain.env`; `pcp doctor` and `pcp env` parse the same file, and `env.sh` reads it too.
+  Bumping a pin is one edit there.
+- **Finding the switch.** Every binary lookup in `pcp.config.env` tries the explicit variable
+  (`PCP_COQC`, `PCP_PET`, ...), then `PATH`, then `$OPAMROOT/$PCP_OPAM_SWITCH/bin` (defaults
+  `~/.opam`, `pcp`). Library roots are `ROCQPATH`/`COQPATH` entries, then the switch's
+  `user-contrib`. Worker environments get the switch's `bin` *appended* to `PATH`. So pcp
+  launched by Claude Code or Codex, with no login shell, finds the toolchain; `eval "$(pcp env)"`
+  is only for a human shell that wants `rocq` on `PATH`. A binary on `PATH` always wins, and
+  `pcp doctor` reports when it does not match the pins.
+- **Sandbox binds.** `--sandbox` replaces `$HOME` with a tmpfs, so a `uv tool` install under
+  `~/.local/share/uv` would vanish inside it. `Sandbox.for_benchmark` therefore binds pcp's own
+  installation read-only (`install_paths()`: `sys.prefix`, `sys.base_prefix`, the package
+  directory; never `$HOME` or an ancestor of it) plus the `pcp` entry point's directories, so
+  `pcp check` runs inside. The bound project root is the enclosing proof-copilot checkout, else
+  the nearest ancestor with a `.pcp/`, else the invocation directory; `/`, `$HOME` and its
+  ancestors are refused, as is a file outside the root. Every `.pcp/` under the root is masked,
+  and so are `CHECKOUT_MASKS` (`.git`, `eval`, `docs`, `tests`) of every checkout under it; a
+  user's own `docs/` and `tests/` stay visible. `wrap` emits mounts shallowest first, so the
+  deepest rule on a path decides and a carve-back can never undo a mask beneath it.
+- **pytanque** is pinned to LLM4Rocq commit `4092b12` (v0.2.2, which speaks coq-lsp 0.2.5's
+  petanque) as a direct git dependency. The PyPI package named `pytanque` is an unrelated
+  project; never replace the pin with a version range.
+
+## 12. What is built
+
+"PLAN" is the section of [`design/PLAN.md`](design/PLAN.md) a feature implements.
+
+### The daily loop (pcp-orch)
+
+`pcp prove FILE LEMMA --plan plan.v` runs end to end: on the canary with scripted workers (CI),
+and with `--runner claude`, with and without `--sandbox --state-tools`.
+
+| PLAN | module | what it does |
+|---|---|---|
+| 8.1 obligation graph, two ledgers | `pcp/orch/graph.py`, `model.py` | SQLite, schema v2 with a migration from v1; every transition validated against the lattice; bodies writable only by the prover role |
+| 8.3 two-zone assembly | `pcp/rocq/assemble.py` | patches reach only proof-body spans; scopes tracked through `Module Import`, aliases and `Module Type` |
+| 8.4 free sentinels | `pcp/orch/sentinels.py` | duplicates, restated root, converging failures, partial correctness (Texan triples too), non-persistent resources stated outside a `□`-boxed triple, hygiene; run on plans and decomposer proposals |
+| 8.7 integrity gate | `pcp/orch/gate.py`, `pcp/rocq/body.py`, `assumptions.py` | §4 |
+| 8.11 dispatch, retry, resume | `pcp/orch/schedule.py`, `prove/` | per-node isolation, attempts bounded across runs, fresh directory per attempt, retry sees the partial, salvage on resume, run lock |
+| 8.11 handoff | `pcp/orch/handoff.py` | stuck node → `.v` for your editor |
+| 8.5 incremental amendments | `pcp/orch/prove/amendments.py`, `amend.py` | §9: provers ask for facts, approver adjudicates contests and `--review-after` reviews |
+| 6 / 8.11 run durability | `pcp/orch/outage.py`, `supervise.py`, `prove/resume.py` | §10: outage pause, in-flight recovery, `--supervise` |
+| 8.6 decomposer role | `pcp/orch/decomposer.py`, `prove/design.py` | read-only toolbox; a proposal type with no proof field; every design fragment passes the gate's static scan; the design contract is loaded once from the corpus |
+| 11 runners | `pcp/orch/runners/` | `codex`, `claude` (headless), `claude-code`, `direct` (Messages API, `[api]` extra), `mock`; one `RunnerSpec` factory that refuses ignored options; bubblewrap sandbox with an env allowlist |
+| 11 provider profiles | `pcp/config/providers.py` | tiers as ordered preferences; a binding applies only when its provider matches the runner (`pcp models`) |
+| 10 cockpit | `pcp/dash/` | `pcp serve` (read-only, resumable SSE) and `pcp report`; no steering |
+| 9.3 sketch compiler | `pcp/orch/sketch.py` | annotation DSL → frozen obligations (`pcp sketch`) |
+| 13 evaluation | `eval/` (checkout only) | harness, ablation arms, the design-rung ladder with `--brief spec-only` ([BENCHMARKS.md](BENCHMARKS.md)) |
+
+### The state layer (pcp-state)
+
+| PLAN | module | what it does |
+|---|---|---|
+| 6 session pool | `pcp/state/petanque.py`, `pool.py`, `session.py` | §6; hard memory limit (`PCP_PET_MEM_LIMIT_MB`) via a per-uid wrapper |
+| 3.1 printer parser | `pcp/state/ipm/parse.py` | all four separator shapes; anonymous `_ : P` hypotheses; 2 030 golden states |
+| 3.1 reflected dump | `pcp/assets/coq/IDump.v`, `pcp/state/ipm/reflect.py` | primary path under `pcp trace --reflect`; the printer is the fallback |
+| 3.2 model, skeletons | `pcp/state/ipm/model.py`, `skeleton.py` | modality read at the head only; `twp` from `[{ }]`; every fupd shape; Iris's precedence |
+| 4 ledger | `pcp/state/ledger/` | name-first matching, evar-aware hashing, goal parentage, `unknown` on ambiguity (`pcp ledger`) |
+| 4.3 persistence oracle | `pcp/state/ipm/oracle.py` | always at the step's own state (`pcp trace --oracle`) |
+| 5 context economy | `pcp/state/render.py`, `digest.py` | explicit selection beats diff-only; `full` never folds; elision always reported (`pcp state`) |
+| 7 tool surface | `pcp/mcp/server.py` | 10 tools, capped at 12; thread-safe (`pcp mcp`, `pcp prove --state-tools`) |
+| 7 pattern compiler + aligner | `pcp/state/ipm/pattern.py`, `diagnose.py` | every IPM token; binary conjunction patterns as Iris 4.5 requires (`pcp destruct`) |
+| 5 / 7 retrieval | `pcp/state/search.py`, `pcp/rocq/library.py` | quoted-substring `Search`, grep fallback, a declaration index (`pcp docs`) |
+| 7 compile-path diagnosis | `pcp/state/explain.py` | `pcp check --diagnose` replays the failing body by byte offset |
+
+### Feature flags (`pcp/config/flags.py`, `[flags]` in `.pcp/config.toml`)
+
+All default to `false`; the canary runs with all of them off.
+
+| flag | PLAN | state |
+|---|---|---|
+| `recursive_decomposition` | 8.2 | policy, difficulty estimate and no-gap check in `pcp/orch/decompose.py`; the recursion is not wired into `prove` |
+| `amendment_lattice` | 8.5 | machine-checked `refute`, taint, impact reports, audit routing in `pcp/orch/amend.py`; quorums and shim TTLs not built |
+
+### Deliberately not built
+
+- An embedding index for premise retrieval (PLAN 7): `Search` at the goal plus grep is the
+  baseline it would have to beat.
+- `AtomicRunner` (PLAN 11): `pcp/orch/runners/atomic.py` records the decision.
+- Preservation probes for invariants (PLAN 9.2), a bespoke TUI (PLAN 10), quorum audits and
+  shim TTLs (PLAN 8.5).
+- A mid-flight ping for one-shot CLIs (PLAN 6): not implementable for `claude -p`; the runner
+  gives the worker its whole budget instead.
+
+### Toolchain facts the code depends on
+
+Rocq's `Timeout` takes an integer; the Rocq 9 front end is `rocq compile`; coqc's
+`characters a-b` are byte offsets; `Print Assumptions` prints `X is assumed to be guarded`
+(colon-less) under `Unset Guard Checking` and `X relies on an unsafe hierarchy` under
+`Unset Universe Checking`. A pin bump must re-check these and re-extract the goldens
+(`make goldens`).
+
+### Verification
+
+About 1 300 tests; the Rocq/petanque parts skip cleanly without a toolchain, which is itself
+tested (`tests/test_layering.py`). Property tests round-trip generated Iris props through the
+skeleton parser and align every compiled intro pattern with its prop; golden tests replay 2 030
+real Iris goal states; the gate, ledger, oracle, reflected dump, MCP tools and pipeline run
+against real Rocq. Every confirmed defect, from the v1 audit and from later adversarial reviews,
+has a regression test named after its scenario.

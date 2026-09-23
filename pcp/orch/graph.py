@@ -5,8 +5,8 @@ needs cycles, and must survive process death -- so it is ours, and it is small.
 
 What the store itself guarantees, so that no caller has to remember to:
 
-* every proof-status move goes through :func:`pcp.orch.model.transition` (the
-  legacy store accepted ``attic -> integrated``);
+* every proof-status move goes through :func:`pcp.orch.model.transition` (so
+  ``attic -> integrated`` is refused);
 * a proof body enters only through :meth:`Graph.record_proof` /
   :meth:`Graph.set_proof_status` with a prover role (:class:`RoleViolation`
   otherwise) -- PLAN.md 8.6's role split is a property of the store, not a prompt;
@@ -300,8 +300,7 @@ class Graph:
         """Group several mutations into one commit.
 
         Integration's N+1 status writes and a plan adoption are one decision each;
-        a crash halfway through must leave none of them (audit: "no multi-row
-        transition is atomic").  Every public method nests inside this.
+        a crash halfway through must leave none of them.  Every public method nests inside this.
         """
         with self._tx():
             yield
@@ -322,15 +321,6 @@ class Graph:
         with self._lock:
             row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return row["value"] if row else default
-
-    def delete_meta(self, key: str) -> bool:
-        """Forget a meta key (e.g. a once-per-epoch adjudication marker, to re-ask)."""
-        with self._lock, self.db:
-            cur = self.db.execute("DELETE FROM meta WHERE key=?", (key,))
-        removed = cur.rowcount > 0
-        if removed:
-            self._emit("meta.deleted", None, key=key)
-        return removed
 
     def put_blob(self, content: str) -> str:
         h = content_hash(content)
@@ -628,7 +618,7 @@ class Graph:
     ) -> int:
         """Record the start of one attempt and return its (globally unique) id.
 
-        ``owner`` is who *stated* the obligation (stored in the legacy ``tier``
+        ``owner`` is who *stated* the obligation (stored in the v1-named ``tier``
         column); ``runner``/``role``/``model`` say who ran it.  Only prover attempts
         count towards ``nodes.attempts``: a decomposer round on the root is not a
         proof attempt, and reporting it as one misattributed effort in every status.
@@ -703,8 +693,8 @@ class Graph:
 
         Only attempts at the node's **current** statement epoch count (or ``epoch``
         when given): a body gated against an earlier statement is not a proof of the
-        current one, and salvaging it re-injected an invalidated proof as a proved
-        sibling (review finding).
+        current one, and salvaging it would re-inject an invalidated proof as a proved
+        sibling.
         """
         node = self.get(node_id_)
         wanted = epoch if epoch is not None else (node.epoch if node else 0)

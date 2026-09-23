@@ -8,10 +8,10 @@ like any other spec-zone artifact.  Failed proofs are evidence about the design,
 fed back for a bounded number of revisions, with replay-first salvage of the proofs
 that survive.
 
-What this module fixes structurally (bugs-pipeline.md, map-prove §6):
+What this module guarantees structurally:
 
 * the contract is loaded **once** from the original corpus and carried through
-  every round -- round 2 no longer runs under ``everything_frozen()``;
+  every round -- round 2 never runs under ``everything_frozen()``;
 * every design fragment and every hoisted preamble line passes the gate's static
   scan: ``Unset Guard Checking`` in a definition is a contract violation, never
   hoisted above the file where nothing looks;
@@ -27,7 +27,6 @@ What this module fixes structurally (bugs-pipeline.md, map-prove §6):
 
 from __future__ import annotations
 
-import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -113,7 +112,7 @@ def _short(code: str, width: int = 80) -> str:
 def scan_child(statement: str, name: str) -> None:
     """A child statement is one sentence and nothing else.  It is frozen verbatim into
     every sibling's file, so ``Lemma foo : True. Unset Guard Checking.`` -- which Rocq
-    accepts -- would hoist an escape hatch past every gate (review finding).  The
+    accepts -- would hoist an escape hatch past every gate.  The
     proposal validator refuses it first; this is the check at the point of use."""
     scan_fragment(statement, name)
     sentences = [s for s in split_sentences(strip_comments(statement)) if s.code.strip()]
@@ -149,8 +148,8 @@ def place_additions(text: str, additions: Sequence[str], *, anchor: str | None =
     above it.  Additions also use each other: each is pulled up to its earliest
     consumer, iterated to a fixpoint and bounded so a cycle terminates (the compile
     then reports it).  An orphan lands before the first proof block *in the anchor's
-    own section*, so it can see the section's ``Σ``; the legacy fallback was the
-    first proof block in the file, which could sit outside it.
+    own section*, so it can see the section's ``Σ`` (the first proof block in the file
+    could sit outside it).
     """
     if not additions:
         return text
@@ -377,8 +376,8 @@ def adopt_proposal(cfg: ProveConfig, graph: Graph, dev: Development, root: Node,
     """Turn a validated proposal into frozen, dispatchable nodes.
 
     Reconciled by statement hash like a plan: a child restated under an existing
-    name gets the new statement at ``epoch+1`` with its body cleared (the legacy
-    adoption kept the old frozen statement while the new one had been typechecked);
+    name gets the new statement at ``epoch+1`` with its body cleared (the statement
+    that was typechecked is the one frozen);
     a revived name comes back from the attic; unproved children the design no longer
     asks for are retired.  Nothing about a proof passes through here.
     """
@@ -457,7 +456,7 @@ def revalidate(
         is_anchor = dev.block(node.name) is not None
         # Siblings are STUBBED (Claim 1: a proof depends only on its siblings' statements),
         # so a sibling whose own body the amendment broke cannot get this sound proof
-        # blamed and reopened (review finding).  Only non-mockable siblings keep a body.
+        # blamed and reopened.  Only non-mockable siblings keep a body.
         others = [
             NodeSpec(
                 o.name, o.statement,
@@ -542,10 +541,9 @@ def read_design_brief(cfg: ProveConfig) -> str:
 def standing_failures(graph: Graph, report: RunReport, *, max_attempts: int) -> RunReport:
     """The failures a resumed run inherited and this dispatch did not touch.
 
-    ``design_failed`` used to read only the current dispatch, so a resume whose one
-    dispatched node proved ended "not integrated" while a contested child and an
-    attempt-exhausted child sat in the graph untouched (spec-only seqlock_wf,
-    2026-09-05).  Those nodes are the design's business too.
+    ``design_failed`` reads only the current dispatch; a resume whose one dispatched
+    node proved must still fail while a contested child or an attempt-exhausted child
+    sits in the graph untouched.  Those nodes are the design's business too.
     """
     from pcp.orch.schedule import NodeOutcome, attempts_spent
 
@@ -912,10 +910,6 @@ class DesignDriver:
             reports.append(report)
             view = RunReport.combined([report, standing_failures(self.graph, report, max_attempts=self.cfg.max_attempts)])
         return dev, RunReport.combined(reports)
-
-
-def elapsed_since(started: float) -> float:
-    return time.perf_counter() - started
 
 
 __all__ = [

@@ -216,11 +216,6 @@ def split_sentences(source: str) -> list[Sentence]:
     return out
 
 
-def sentences_code(source: str) -> list[str]:
-    """The code of every sentence, comments stripped -- what a replay sends to Rocq."""
-    return [s.code for s in split_sentences(source) if s.code.strip()]
-
-
 def identifiers(code: str) -> list[str]:
     """Every identifier-like token in ``code`` outside comments and strings, in order.
 

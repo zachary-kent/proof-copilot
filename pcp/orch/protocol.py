@@ -44,9 +44,9 @@ def unreadable_reason(path: Path) -> str:
     """Why ``path`` may not be read as a worker file; ``""`` when it may.
 
     Only a regular file (no symlink) below :data:`MAX_WORKER_FILE_BYTES` is read.  A
-    FIFO or a symlink to ``/dev/zero`` named ``answer.json`` blocked the orchestrator
-    forever, and a directory named ``proof.v`` made the runner raise -- a worker must
-    not be able to do either (review finding).
+    FIFO or a symlink to ``/dev/zero`` named ``answer.json`` would block the orchestrator
+    forever, and a directory named ``proof.v`` would make the runner raise -- a worker
+    must not be able to do either.
     """
     try:
         st = os.lstat(path)

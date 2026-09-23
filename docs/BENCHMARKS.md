@@ -6,6 +6,12 @@ contamination controls a *public* corpus needs.
 
 [repo]: https://github.com/cmuparlay/bigatomic-mechanization
 
+**Everything here needs a checkout.** `eval/` (the harness, the ladder, the corpora) is not
+part of the installed package; clone the repository and follow the README's Development
+section, then run these commands from the checkout root with `. ./env.sh` sourced. The answer
+keys live under `.pcp/reference/`, which is never committed: `make bench` regenerates the
+corpus and the keys from ported upstream sources.
+
 ## The ladder
 
 Five rungs, in increasing order of held-out proof size. Everything except the named
@@ -41,7 +47,7 @@ auth_both_frac_valid_discrete → auth_both_dfrac_valid_discrete
 auth_auth_frac_op_inv        → auth_auth_dfrac_op_inv
 ```
 
-`eval/corpus/bench/../port.sh` does this by iteration: compile, read the first
+`scripts/port-upstream.sh <dir> <module>` does this by iteration: compile, read the first
 "not found" identifier, try the frac→dfrac rename, repeat. `CachedWaitFree.v` needed
 no changes at all.
 

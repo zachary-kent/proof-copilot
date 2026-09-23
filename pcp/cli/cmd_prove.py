@@ -27,9 +27,8 @@ from pcp.cli.common import absolute, note
 from pcp.cli.runners import library_dirs, select_approver, select_decomposer, select_runner, state_tools_for
 from pcp.config.load import load
 from pcp.errors import PcpError, UsageError
-from pcp.util.io import ensure_dir, json_dumps, read_text, rm_tree
+from pcp.util.io import ensure_dir, json_dumps, rm_tree
 from pcp.util.locks import RunLock
-from pcp.util.paths import repo_root
 
 GRAPH_SIDECARS = ("-wal", "-shm")
 #: Flags a re-exec never carries: the launcher's own, and ``--fresh`` (the launcher
@@ -39,9 +38,12 @@ LAUNCH_VALUED = ("--max-restarts", "--supervised-child", "--outcome-file", "--re
 
 
 def load_skills() -> list[str]:
-    """Worker norms travel with the packet, not with the prompt template."""
-    path = repo_root() / "skills" / "prover.md"
-    return [read_text(path)] if path.exists() else []
+    """Worker norms travel with the packet, not with the prompt template.  Packaged
+    (:mod:`pcp.util.assets`), so a missing file is a broken install and fails the run
+    instead of silently sending workers out without their norms."""
+    from pcp.util.assets import PROVER_SKILL, skill_text
+
+    return [skill_text(PROVER_SKILL)]
 
 
 def fresh_start(graph: Path, workroot: Path) -> None:
@@ -154,6 +156,8 @@ def cmd_prove(args: argparse.Namespace) -> int:
         approver = select_approver(args, cfg, corpus_dir=corpus_dir, library=library)
         notes.append(f"approver: {approver.name}")
 
+    # Before --fresh: a broken install must fail before it wipes the graph.
+    skills = load_skills()
     if args.fresh:
         fresh_start(graph, workroot)
     record_root = absolute(args.record) if args.record is not None else None
@@ -173,7 +177,7 @@ def cmd_prove(args: argparse.Namespace) -> int:
         node_seconds=float(args.node_seconds),
         max_attempts=int(args.attempts),
         intent=args.intent,
-        skills=load_skills(),
+        skills=skills,
         state_tools=state_tools,
         library=library,
         record_root=record_root,

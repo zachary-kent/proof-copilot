@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import _ipm_standin  # noqa: F401
-
 from pcp.state.ipm.model import Hyp, IrisGoal, Step
 from pcp.state.ledger.diff import diff_step
 from pcp.state.ledger.events import Event

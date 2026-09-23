@@ -7,8 +7,8 @@ PLAN.md 8.1 gives a node two ledgers with separate lifecycles::
     proof:      open → claimed → qed → gated → integrated        (per epoch)
                           └──▶ contested(evidence) | stuck(evidence, requests)
 
-The legacy store accepted any status string and any move (``attic → integrated``
-included), so the lattice lived in callers' heads and drifted.  Here it is a table,
+A store that accepts any status string and any move (``attic → integrated``
+included) leaves the lattice in callers' heads, where it drifts.  Here it is a table,
 :func:`transition` checks every move against it, and :class:`pcp.orch.graph.Graph`
 refuses what it rejects -- ARCHITECTURE.md §3 rule 7.
 """
@@ -27,7 +27,6 @@ PROOF_STATUSES: tuple[str, ...] = (
     "open", "claimed", "qed", "gated", "integrated", "contested", "stuck", "attic",
 )
 RANKS: tuple[str, ...] = ("root", "interface", "local")
-OWNERS: tuple[str, ...] = ("human", "decomposer")
 #: Roles that may attach proof text.  Exactly one, on purpose (PLAN.md 8.6).
 PROOF_BEARING_ROLES: tuple[str, ...] = ("prover",)
 #: What an attempt row may end as (``claimed`` while in flight).
@@ -143,8 +142,8 @@ class Budget:
         """Nothing left on any dimension.
 
         A clock-only budget (``requests = tokens = dollars = 0``, ``seconds > 0``) is
-        *live*: the legacy check ignored the clock and reported every such budget as
-        exhausted, which silently refused every decomposition under the default
+        *live*: ignoring the clock would report every such budget as exhausted and
+        silently refuse every decomposition under the default
         ``Budget(requests=200, seconds=7200)`` split more than 200 ways.
         """
         if self.unset:

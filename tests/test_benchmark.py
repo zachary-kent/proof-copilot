@@ -3,10 +3,9 @@
 Every test here is a way the corpus could silently stop measuring what it claims to
 measure: a holdout that leaves the proof behind, an anonymisation that leaves a name
 behind, a scrub that leaves the ghost-state plan behind, or an answer key that ends up
-inside the corpus.  The legacy bug list (map-eval §6: primed names never renamed,
-one-line ``Require`` regex, names matched inside the keyword ``Definition``, a probe
-whose failure was silent, a class body ended at the first ``}``, only the last stacked
-comment dropped) is covered by tests named after each scenario.
+inside the corpus.  Each scenario -- primed names, multi-line ``Require``, names
+inside the keyword ``Definition``, a probe whose failure must be loud, a class body
+containing ``}``, stacked comments -- has a test named after it.
 """
 
 from __future__ import annotations
@@ -168,8 +167,8 @@ def test_stubbing_keeps_implicit_and_typeclass_binders_and_types_the_bare_ones()
 
 
 def test_stubbing_a_name_that_is_a_substring_of_the_keyword_definition() -> None:
-    """``fin`` occurs inside ``Definition``; the legacy split on the first substring
-    match and produced binders ``ition fin n``."""
+    """``fin`` occurs inside ``Definition``; splitting on the first substring match
+    would produce binders ``ition fin n``."""
     out, stubs = stub_definitions(DESIGN_SAMPLE, ["fin"])
     assert stubs[0].stub == "Definition fin (n : nat) : iProp Σ := True%I."
     assert out.count("Definition fin") == 1 and "(ition" not in out
@@ -222,7 +221,7 @@ def test_about_output_is_parsed_including_wrapped_types_and_qualified_names() ->
 
 
 def test_a_failed_signature_probe_is_an_error_not_an_empty_answer(monkeypatch) -> None:
-    """The legacy returned ``{}`` on a failed compile and the failure surfaced later as
+    """A failed compile is reported at once, not returned as ``{}`` to surface later as
     an unrelated type error in the final verify."""
     import eval.make_benchmark as mb
     from pcp.rocq.project import CompileResult
@@ -266,8 +265,8 @@ def test_dropping_a_declaration_takes_its_introducing_comment_with_it() -> None:
 
 
 def test_dropping_takes_the_whole_stacked_comment_block() -> None:
-    """The legacy dropped only the *last* comment of a stack; the first one, which
-    describes the answer as surely as the invariant does, survived."""
+    """Every comment of a stack is dropped, not only the *last*: the first one describes
+    the answer as surely as the invariant does."""
     src = "Definition a := 0.\n\n(* the registry RA *)\n(* it maps requests to flags *)\nDefinition registry_inv := 1.\n\nDefinition b := 2.\n"
     out, _ = drop_declarations(src, ["registry_inv"])
     assert "registry RA" not in out and "maps requests" not in out
@@ -309,7 +308,7 @@ def test_imports_can_be_replaced_wholesale_including_dotted_module_names() -> No
 
 def test_a_multi_line_require_is_removed_by_set_imports() -> None:
     """``From iris.base_logic.lib Require Import\\n  ghost_var token.`` has no ``.`` on
-    its first line; the legacy one-line regex left it in place."""
+    its first line; a one-line regex would leave it in place."""
     source = "From iris.base_logic.lib Require Import\n  ghost_var token.\nFrom iris.heap_lang Require Import\n  lang\n  proofmode.\n\nDefinition f := 1.\n"
     out = set_imports(source, ["From iris.heap_lang Require Import lang proofmode notation."])
     assert "ghost_var" not in out and "token" not in out
@@ -333,7 +332,7 @@ def test_minimizing_a_class_removes_the_ghost_state_plan() -> None:
 
 def test_class_minimisation_handles_annotated_and_generalising_binders() -> None:
     """``Class seqlockG (Σ : gFunctors) := {`` must reduce like ``Class rwcasG Σ := {``;
-    the legacy binder pattern stopped at the ``:`` inside the annotation."""
+    the binder pattern must not stop at the ``:`` inside the annotation."""
     for header in ("Class rwcasG Σ", "Class seqlockG (Σ : gFunctors)", "Class odd `{!heapGS Σ}"):
         name = header.split()[1]
         src = header + " := {\n  a :: heapGS Σ;\n  secret :: inG Σ SomeRA;\n}.\n"
@@ -342,8 +341,8 @@ def test_class_minimisation_handles_annotated_and_generalising_binders() -> None
 
 
 def test_class_minimisation_survives_a_brace_inside_a_field_type() -> None:
-    """The legacy ended the body at the first ``}``, so a ``{[ ... ]}`` in a field's
-    type left the old tail -- and the ghost state -- in place."""
+    """The body does not end at the first ``}``: a ``{[ ... ]}`` in a field's type would
+    leave the old tail -- and the ghost state -- in place."""
     src = "Class fooG Σ := {\n  a :: inG Σ (authR (gsetUR {[ 1 ]}));\n  secret :: inG Σ X;\n}.\nDefinition p := 0.\n"
     out = minimize_class(src, "fooG", ["keep :: heapGS Σ"])
     assert "secret" not in out and "gsetUR" not in out
@@ -439,8 +438,8 @@ def test_local_names_covers_declarations_instance_fields_and_sections_only() -> 
 
 
 def test_primed_identifiers_are_renamed_as_whole_names() -> None:
-    """``\\bread'\\b`` never matched: primed names survived every legacy build while
-    their unprimed prefix was renamed *inside* them (``read'`` -> ``f6'``)."""
+    """``\\bread'\\b`` never matches, so a word-boundary rename would leave primed names
+    alone while renaming their unprimed prefix *inside* them (``read'`` -> ``f6'``)."""
     src = (
         "Definition read : val := #0.\nDefinition read' : val := #1.\n"
         "Lemma wp_array_copy_to' (l : loc) : read' = read'.\nProof. rewrite /read'. reflexivity. Qed.\n"

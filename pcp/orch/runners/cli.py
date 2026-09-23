@@ -13,8 +13,8 @@ its ``pcp mcp`` server and that server's petanque die with it.
 The status decision is one table-driven function, :func:`decide`, and it takes the
 process's exit status and the stream's own verdict as first-class inputs: a CLI that
 exits non-zero having written no answer is an ``error`` (infrastructure, never
-retried), not a worker's ``stuck`` -- the legacy runner never read the exit code and
-burned a retry on every revoked token (ARCHITECTURE.md 8, "misclassified failures").
+retried), not a worker's ``stuck``, so a revoked token never burns a retry
+(ARCHITECTURE.md 8, "misclassified failures").
 """
 
 from __future__ import annotations

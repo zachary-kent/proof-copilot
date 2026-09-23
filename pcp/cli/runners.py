@@ -3,17 +3,18 @@
 One place decides which runner runs, which model it gets, and what it is allowed to
 ignore -- and it decides in that order.  ``--runner auto`` honours the configured
 tier's provider preference; a ``provider/model`` flag is validated against the
-runner *actually chosen* (the legacy CLI checked it against a hard-coded
-``anthropic`` before choosing, so ``--runner codex --prover-model codex/luna`` was
-refused); and every option reaches the runner through :class:`RunnerSpec`, whose
-factory refuses what the runner would ignore, so ``--state-tools --runner codex``
-fails loudly instead of recording an ablation arm that never had its tools.
+runner *actually chosen*, so ``--runner codex --prover-model codex/luna`` is accepted
+rather than checked against a hard-coded ``anthropic``; and every option reaches the
+runner through :class:`RunnerSpec`, whose factory refuses what the runner would
+ignore, so ``--state-tools --runner codex`` fails loudly instead of recording an
+ablation arm that never had its tools.
 """
 
 from __future__ import annotations
 
 import argparse
 import functools
+import os
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -33,15 +34,19 @@ from pcp.orch.runners.base import (
     is_subprocess_runner,
     provider_for,
 )
-from pcp.util.paths import repo_root
+from pcp.orch.runners.sandbox import CHECKOUT_MASKS
+from pcp.util.paths import home as user_home
 
 __all__ = [
     "NO_RUNNER",
     "effort_for",
+    "is_pcp_checkout",
     "library_dirs",
     "model_for",
+    "nested_masks",
     "pick_auto",
     "sandbox_for",
+    "sandbox_root",
     "select_approver",
     "select_decomposer",
     "select_runner",
@@ -127,7 +132,14 @@ def effort_for(role: str, cfg: Config, runner: str, *, flag: str | None) -> str 
 def sandbox_for(
     args: argparse.Namespace, runner_name: str, *, corpus_dir: Path, library: Sequence[Path]
 ) -> Any:
-    """The bubblewrap policy for a benchmark run (contract §1.1, §3.4)."""
+    """The bubblewrap policy for a benchmark run (contract §1.1, §3.4).
+
+    The project root (:func:`sandbox_root`) is bound read-only with every pcp state
+    directory in it masked -- its own ``.pcp``, the invocation directory's, and any
+    nested project's (:func:`nested_masks`) -- and, in a proof-copilot checkout, the
+    checkout's ``eval/``, ``docs/``, ``tests/`` and ``.git``; a user's project keeps
+    its own.  The invocation directory's docs index is carved back.
+    """
     from pcp.orch.runners import sandbox as sb
 
     if not is_subprocess_runner(build_runner(RunnerSpec(runner_name))):
@@ -138,10 +150,68 @@ def sandbox_for(
     if not sb.available():
         raise UsageError("--sandbox needs bubblewrap (`bwrap`); install it or drop --sandbox")
     reference = absolute(getattr(args, "reference", None))
+    cwd = Path.cwd().resolve()
+    project = sandbox_root(cwd)
+    corpus = Path(corpus_dir).resolve()
+    workroot = absolute(getattr(args, "workroot", None))
+    staged = workroot is not None and corpus.is_relative_to(workroot)
+    if not corpus.is_relative_to(project) and not staged:
+        # The corpus is carved back whole, and outside the root nothing in it is
+        # masked; a ``--brief spec-only`` staging under the workroot is pcp's own copy.
+        raise UsageError(
+            f"--sandbox: {corpus} is outside the project {project}; run `pcp prove` from the project that contains the file"
+        )
+    masks = [*nested_masks(project), str((cwd / ".pcp").relative_to(project))]
     return sb.Sandbox.for_benchmark(
-        repo_root(), reference=reference, corpus_dir=corpus_dir, library=list(library),
-        provider=provider_for(runner_name),
+        project, reference=reference, corpus_dir=corpus, library=list(library),
+        provider=provider_for(runner_name), masks=masks, docs=cwd / ".pcp" / "docs",
     )
+
+
+def sandbox_root(cwd: Path) -> Path:
+    """The tree a sandboxed worker sees read-only: the enclosing proof-copilot checkout
+    if there is one (so ``cd eval`` still masks the sibling rungs), else the nearest
+    ancestor holding a ``.pcp/``, else ``cwd``.  ``$HOME`` and its ancestors are never
+    candidates, and a root that is ``/``, ``$HOME`` or an ancestor of it is refused:
+    binding it would hand the worker every transcript and key the home tmpfs hides."""
+    home = user_home().resolve()
+    ancestry = [p for p in (cwd, *cwd.parents) if p != home and p not in home.parents]
+    root = next((p for p in ancestry if is_pcp_checkout(p)), None)
+    if root is None:
+        root = next((p for p in ancestry if (p / ".pcp").is_dir()), cwd)
+    if root == home or root in home.parents:
+        raise UsageError(
+            f"--sandbox would bind {root} -- your home directory or above -- read-only into the worker; "
+            "run `pcp prove` from inside the project instead"
+        )
+    return root
+
+
+#: Never descended into while looking for nested projects: dependency and build trees.
+_SCAN_SKIP = frozenset({".git", "_opam", "node_modules", "_build", "__pycache__", ".venv"})
+
+
+def nested_masks(root: Path) -> list[str]:
+    """Every subtree of ``root`` that holds another run's answers, relative to it.
+
+    A ``.pcp`` anywhere below the root (a run started from a subdirectory, a nested
+    project) holds that run's reference and graph; a nested proof-copilot checkout
+    holds its benchmarks.  The root's own are included.  Found subtrees are masked,
+    so the walk does not descend into them."""
+    out: list[str] = []
+    for dirpath, dirnames, _files in os.walk(root):
+        here = Path(dirpath)
+        found = [".pcp", *CHECKOUT_MASKS] if is_pcp_checkout(here) else [".pcp"]
+        hidden = [name for name in found if (here / name).exists()]
+        out += [str((here / name).relative_to(root)) for name in hidden]
+        dirnames[:] = [d for d in dirnames if d not in hidden and d not in _SCAN_SKIP]
+    return out
+
+
+def is_pcp_checkout(root: Path) -> bool:
+    """Whether ``root`` is a proof-copilot source checkout (not merely a project that
+    uses pcp): the package sources and the benchmark tree side by side."""
+    return (root / "pcp" / "__init__.py").is_file() and (root / "eval").is_dir() and (root / "pyproject.toml").is_file()
 
 
 def select_runner(

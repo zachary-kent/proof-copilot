@@ -180,3 +180,13 @@ def test_summarize_agrees_with_classify_record():
 
 def test_empty_report_renders_nothing_to_report():
     assert "nothing to report" in FailureReport().render()
+
+
+def test_a_protocol_violation_recorded_with_status_error_stays_a_protocol_violation():
+    c = classify("the decomposer produced no JSON object to read", status="error")
+    assert c.classes[:2] == ["protocol-violation", "runner-error"]
+    c = classify("each definition must be an object", status="error")
+    assert c.primary == "protocol-violation"
+    c = classify("claude exited with status 1 and wrote no answer: 401 OAuth access token has been revoked", status="error", exit_code=1)
+    assert c.primary == "runner-error"
+    assert classify("worker exceeded its 1800s deadline and was killed", status="error").primary == "runner-error"

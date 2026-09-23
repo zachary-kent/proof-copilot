@@ -6,8 +6,8 @@ hit an ambiguity the chain says so (PLAN.md 4.4).
 
 The queries are functions over anything with ``.steps`` and ``.events`` (a ``Trace``,
 or a stand-in in tests) so the ledger stays importable without petanque.  Liveness is
-checked in **every** goal of a step, not ``goals[0]`` (legacy bug: a hypothesis live in a
-sibling goal was reported consumed), and an unrecognised last event yields ``unknown``,
+checked in **every** goal of a step, not ``goals[0]`` (a hypothesis live in a
+sibling goal is not consumed), and an unrecognised last event yields ``unknown``,
 never ``consumed``.
 """
 
@@ -360,8 +360,8 @@ def blame(trace: TraceLike, failing_step: int, needed_hyp: str) -> Blame:
 def was_persistent(trace: TraceLike, name: str, culprit: Event) -> bool:
     """Persistence read at the step the hypothesis existed, not in the final goal.
 
-    A blamed hypothesis is, by construction, gone from the final goal, which is why
-    the legacy ``duplicate-it-is-persistent`` was unreachable.
+    A blamed hypothesis is, by construction, gone from the final goal, so reading
+    persistence there would never find it.
     """
     if culprit.klass == "intuitionistic":
         return True

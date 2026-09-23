@@ -7,11 +7,11 @@ path measures nothing (PLAN.md 13).  :func:`register` is the mechanical adapter 
 whichever ``mcp`` SDK generation is installed.
 
 Why it is locked: the ``mcp`` SDK runs synchronous tools on worker threads and a
-client issues independent tool calls in parallel.  v1 minted duplicate session ids and
-interleaved ``proof_step``/``proof_try`` on one session (ARCHITECTURE.md 8, "state sent
-to the wrong process").  Here the session table is mutated under one lock and every
-session carries its own lock, so two calls on one session serialise while two sessions
-pinned to two ``pet`` processes proceed concurrently.
+client issues independent tool calls in parallel, so nothing may mint duplicate
+session ids or interleave ``proof_step``/``proof_try`` on one session (ARCHITECTURE.md
+8, "state sent to the wrong process").  The session table is mutated under one lock
+and every session carries its own lock, so two calls on one session serialise while
+two sessions pinned to two ``pet`` processes proceed concurrently.
 
 Why a "lost" shape exists: a process that died or restarted is a *transport* fact, not
 a wrong tactic (PLAN.md 4.4).  Any tool that meets a ``StateError`` answers
@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pcp import __version__
 from pcp.errors import PcpError, StateError, ToolchainError, UsageError
 from pcp.mcp.names import MAX_TOOLS, MCP_SERVER_NAME, TOOLS
 from pcp.rocq.assemble import Development, parse_plan
@@ -140,8 +141,9 @@ def _guard(*, lost: bool) -> Callable[[Callable[..., dict[str, Any]]], Callable[
 def default_blame_step(trace: Trace) -> int:
     """The step ``blame`` asks about when none is given: the failed one, else the next one.
 
-    Steps are numbered ``0..n``; v1 defaulted to ``len(steps)`` even when the trace had
-    stopped at a failure, so the report named a step that never ran.
+    Steps are numbered ``0..n``; the default is the failed step when the trace
+    stopped at one, never ``len(steps)``, so the report never names a step that
+    never ran.
     """
     if trace.failed_at is not None:
         return trace.failed_at
@@ -155,10 +157,14 @@ class PcpServer:
     """The tool implementations.  Thread-safe; every method returns a JSON-shaped dict."""
 
     def __init__(self, workspace: str | Path, *, pool_size: int = 2, coq_root: str | Path | None = None) -> None:
-        self.workspace = Path(workspace).resolve()
+        resolved = Path(workspace).resolve()
+        if not resolved.is_dir():
+            placeholder = " (an unexpanded template placeholder? the host must substitute it)" if "${" in str(workspace) else ""
+            raise UsageError(f"--workspace {workspace!r} does not exist{placeholder}")
+        self.workspace = resolved
         self.pool_size = pool_size
         #: Where ``IDump.vo`` is built for ``reflect=True``.  Absolute, under the
-        #: workspace by default -- never relative to the process's cwd (legacy bug).
+        #: workspace by default -- never relative to the process's cwd.
         self.coq_root = Path(coq_root).resolve() if coq_root is not None else self.workspace / ".pcp" / "coq"
         self.pool = SessionPool(self.workspace, size=pool_size)
         self._reflect_pool: SessionPool | None = None
@@ -222,8 +228,8 @@ class PcpServer:
         """The reflect pool spawns its processes with ``IDump`` on the load path.
 
         A ``pet`` captures its environment at spawn, so ``reflect`` cannot be switched on
-        for a process that is already running (legacy bug: ``os.environ`` was patched
-        after the fact and ``Require Import pcp.IDump`` failed inside ``start``).  Hence a
+        for a process that is already running: patching ``os.environ`` after the fact
+        would leave ``Require Import pcp.IDump`` failing inside ``start``.  Hence a
         second pool whose every process is born with the right env; it costs nothing
         until the first ``reflect=True``.
         """
@@ -251,8 +257,8 @@ class PcpServer:
     ) -> list[Rendered]:
         """One budgeted render per goal, diffed positionally against ``prev`` (PLAN.md 5).
 
-        Positional: goal ``i`` against the previous goal ``i``; a goal with no
-        counterpart renders in full.  v1 diffed every goal against ``prev[0]``.
+        Positional: goal ``i`` against the previous goal ``i``, never every goal
+        against ``prev[0]``; a goal with no counterpart renders in full.
         """
         out: list[Rendered] = []
         for i, goal in enumerate(goals):
@@ -314,8 +320,8 @@ class PcpServer:
                     "ok": result.ok,
                     "error": result.error,
                     "loop_of": rec.tracer.step_number(result.loop_of),
-                    # Only a failure gets a diagnosis: v1 attached the apply/leftover
-                    # paragraphs to successes too and misled the model.
+                    # Only a failure gets a diagnosis; a success never gets the
+                    # apply/leftover paragraphs, which would mislead the model.
                     "diagnosis": "" if result.ok else self._diagnose(tactic, result.error, before),
                 }
             step = rec.tracer.step(tactic)
@@ -361,7 +367,7 @@ class PcpServer:
                 out["elided"] = elided
             if not target.ok:
                 # A failed step records the goals *before* the tactic; say so rather
-                # than let the model believe the tactic applied (legacy bug).
+                # than let the model believe the tactic applied.
                 out["ok"] = False
                 out["error"] = target.error
             return out
@@ -487,8 +493,8 @@ class PcpServer:
                 out["goal"] = [r.text for r in self._render(rec, step.goals, prev=before)]
                 rec.seen_step = step.step
             else:
-                # The real error, diagnosed against the goal it was applied to -- v1
-                # aligned the compiled pattern with the skeleton it came from (a tautology).
+                # The real error, diagnosed against the goal it was applied to, not
+                # against the skeleton the compiled pattern came from (a tautology).
                 out["diagnosis"] = self._diagnose(tactic, step.error, before)
             return out
 
@@ -636,18 +642,23 @@ def make_mcp(name: str = MCP_SERVER_NAME) -> Any:
 
     ``FastMCP`` (mcp 1.x) became ``MCPServer`` (mcp 2.x) with the same decorator shape.
     ``import mcp`` succeeds on both, so only constructing the server proves anything --
-    ``pcp doctor`` calls this for that reason.
+    ``pcp doctor`` calls this for that reason.  ``serverInfo.version`` is set to ours
+    when the installed SDK accepts it, so a client's "connected to pcp" line names a
+    real, bumpable version instead of the SDK's blank default.
     """
     try:
         from mcp.server.mcpserver import MCPServer  # mcp >= 2
 
-        return MCPServer(name)
+        return MCPServer(name, version=__version__)
     except ImportError:
         pass
     try:
         from mcp.server.fastmcp import FastMCP  # type: ignore[attr-defined]  # mcp < 2
 
-        return FastMCP(name)
+        try:
+            return FastMCP(name, version=__version__)
+        except TypeError:
+            return FastMCP(name)  # older mcp<2 releases had no `version` kwarg
     except ImportError as exc:
         raise ToolchainError(NO_SDK_MESSAGE) from exc
 
@@ -689,9 +700,9 @@ class ParentWatch(threading.Thread):
     A stdio server notices its client leaving as EOF on stdin -- only if it is ever
     back in the read loop; one server sat inside a runaway petanque call and outlived
     its worker by hours.  The death signal is bound to the *thread* that set it and
-    fired whenever an anyio worker thread exited (the v1 critical bug), so instead a
-    thread polls ``getppid``: reparenting to init (1) or to a subreaper -- any change
-    from the original parent -- means the client is gone.
+    would fire whenever an anyio worker thread exited, so instead a thread polls
+    ``getppid``: reparenting to init (1) or to a subreaper -- any change from the
+    original parent -- means the client is gone.
     """
 
     def __init__(self, on_orphan: Callable[[], None], *, interval_s: float = PARENT_WATCH_INTERVAL_S) -> None:

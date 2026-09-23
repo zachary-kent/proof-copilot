@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
-from pcp.config.flags import DEFAULT_FLAGS
+from pcp.config.flags import DEFAULT_FLAGS, RETIRED_FLAGS
 from pcp.errors import UsageError
 
 ROLES = ("decomposer", "prover", "auditor")
@@ -72,6 +73,10 @@ class Config:
                 )
         if self.concurrency is not None and self.concurrency < 1:
             raise UsageError("config: concurrency must be >= 1")
-        for name in self.flags:
+        for name in list(self.flags):
+            if name in RETIRED_FLAGS:
+                warnings.warn(f"config: flag {name!r} was retired; ignoring it", stacklevel=2)
+                del self.flags[name]
+                continue
             if name not in DEFAULT_FLAGS:
                 raise UsageError(f"config: unknown flag {name!r}; known: " + ", ".join(DEFAULT_FLAGS))

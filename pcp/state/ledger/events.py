@@ -9,7 +9,7 @@ Field discipline, which the queries rely on: every *consume-side* event (``Consu
 every *produce-side* event (``Intro``, ``Produce``, ``Split``, ``Specialize``) has the
 new name as ``hyp``, its provenance in ``sources`` and **all** names the step produced
 from those sources in ``targets`` -- so ``blame`` can say "step 2 split it into H1, H2"
-without hand-built events (legacy bug: ``Split`` never carried targets).
+without hand-built events.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ _PAST: dict[str, str] = {
 
 
 def past_tense(kind: str) -> str:
-    """``Split`` -> ``split``, never ``splitd`` (legacy bug)."""
+    """``Split`` -> ``split``, never ``splitd``."""
     return _PAST.get(kind, kind.lower())
 
 
@@ -135,9 +135,6 @@ class EventLog(list[Event]):
     def add(self, event: Event) -> Event:
         self.append(event)
         return event
-
-    def for_hyp(self, hyp: str) -> list[Event]:
-        return [e for e in self if e.hyp == hyp or hyp in e.sources or hyp in e.targets]
 
     def at_step(self, step: int) -> list[Event]:
         return [e for e in self if e.step == step]

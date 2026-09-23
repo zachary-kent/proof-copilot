@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import _ipm_standin  # noqa: F401
-
 from pcp.state.diagnose import diagnose
 from pcp.state.ipm.model import Hyp, IrisGoal, Modality
 

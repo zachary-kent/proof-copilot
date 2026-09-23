@@ -1,6 +1,13 @@
 # proof-copilot — design and development plan
 
-Status: draft v1, 2026-08-28. Greenfield repo, no code yet.
+> **This is the design record, not the manual.** It was written before the code and
+> kept as the rationale behind it: why each part is shaped the way it is, including
+> ideas that were deferred or dropped. Where it disagrees with the code, the code and
+> [`../ARCHITECTURE.md`](../ARCHITECTURE.md) are authoritative; [`../../README.md`](../../README.md)
+> is how to use the tool. Code comments cite it by section ("PLAN.md 8.11"). The
+> phase plan (§12) and repo layout (§15) are historical.
+
+Original status: draft v1, 2026-08-28, before any code existed.
 
 ## 0. Thesis
 

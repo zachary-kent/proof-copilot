@@ -1,16 +1,18 @@
-# Common tasks. Everything assumes `. ./env.sh` has been sourced.
-.PHONY: help toolchain install test fast canary lint typecheck bench bench-run ladder docs-index goldens clean
+# Common tasks for a checkout. Everything assumes `. ./env.sh` has been sourced.
+.PHONY: help toolchain install install-check test fast canary lint typecheck bench bench-run ladder docs-index goldens clean
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-12s %s\n", $$1, $$2}'
 
-toolchain:  ## build the pinned Rocq/Iris/coq-lsp opam switch (Phase 0)
-	./scripts/setup-toolchain.sh
+toolchain:  ## build the pinned Rocq/Iris/coq-lsp opam switch (= `pcp setup`; pins: pcp/assets/toolchain.env)
+	bash pcp/assets/setup-toolchain.sh
 
 install:  ## create the venv and install pcp with dev extras
 	uv venv --python 3.11 .venv
-	uv pip install --python .venv/bin/python -e '.[mcp,dev]' \
-		'pytanque @ git+https://github.com/LLM4Rocq/pytanque'
+	uv pip install --python .venv/bin/python -e '.[mcp,dev]'
+
+install-check:  ## build a wheel, install it non-editable in a fresh venv, load every packaged asset from it
+	.venv/bin/python -m pytest -q -m slow tests/test_install.py
 
 test:  ## the whole suite
 	.venv/bin/python -m pytest -q

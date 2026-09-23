@@ -1,0 +1,17 @@
+{
+  "$schema": "https://claude.com/schemas/marketplace.json",
+  "name": "proof-copilot",
+  "owner": {
+    "name": "Zak Kent",
+    "email": "zkent@cs.cmu.edu"
+  },
+  "description": "proof-copilot (pcp): Iris proof state and an obligation-graph orchestrator for Rocq",
+  "plugins": [
+    {
+      "name": "proof-copilot",
+      "source": "./integrations/claude-code",
+      "description": "The pcp MCP proof-state tools, plus skills for driving pcp runs, debugging Iris proofs by hand, and first-run setup",
+      "category": "development"
+    }
+  ]
+}

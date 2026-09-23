@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     prove.add_argument("lemma")
     prove.add_argument("--plan", type=Path, help=".v file of child statements")
     prove.add_argument("--runner", default="auto", help="auto | codex | claude | claude-code | direct | mock")
-    prove.add_argument("--model", default=None, help="legacy alias for --prover-model")
+    prove.add_argument("--model", default=None, help="alias for --prover-model")
     prove.add_argument("--prover-model", default=None, metavar="MODEL",
                        help="model for the prover role (default: the provider's prover tier)")
     prove.add_argument("--decomposer", default=None, metavar="MODEL",
@@ -157,9 +157,45 @@ def build_parser() -> argparse.ArgumentParser:
     models.add_argument("--config", type=Path, default=None)
     models.set_defaults(func=_dispatch("cmd_doctor", "cmd_models"))
 
-    doctor = sub.add_parser("doctor", help="check the toolchain and provider logins")
+    doctor = sub.add_parser("doctor", help="check the toolchain, its pins, packaged assets and provider logins")
     doctor.add_argument("--config", type=Path, default=None)
     doctor.set_defaults(func=_dispatch("cmd_doctor", "cmd_doctor"))
+
+    setup = sub.add_parser("setup", help="build the pinned Rocq/Iris/coq-lsp opam switch (idempotent)")
+    setup.add_argument("--dry-run", action="store_true", help="print the opam commands that would run, change nothing")
+    setup.add_argument("--switch", default=None, metavar="NAME",
+                       help="opam switch to build (default: $PCP_OPAM_SWITCH, else the pinned name `pcp`)")
+    setup.add_argument("--jobs", type=int, default=None, metavar="N", help="parallel opam jobs (default: all cores)")
+    setup.add_argument("--force", action="store_true", help="run the script even when every pin already matches")
+    setup.set_defaults(func=_dispatch("cmd_setup", "cmd_setup"))
+
+    envp = sub.add_parser("env", help='print shell exports for the pinned switch: eval "$(pcp env)"')
+    envp.add_argument("--switch", default=None, metavar="NAME", help="default: $PCP_OPAM_SWITCH, else `pcp`")
+    envp.set_defaults(func=_dispatch("cmd_setup", "cmd_env"))
+
+    init = sub.add_parser("init", help="make a directory a pcp project: write .pcp/config.toml, git-ignore .pcp/")
+    init.add_argument("dir", nargs="?", type=Path, default=None, help="project directory (default: .)")
+    init.add_argument("--force", action="store_true", help="overwrite an existing .pcp/config.toml")
+    init.set_defaults(func=_dispatch("cmd_init", "cmd_init"))
+
+    integ = sub.add_parser("integrate", help="print (or --write) the pcp MCP server config for Claude Code / "
+                                              "Codex, or an AGENTS.md block (docs/INTEGRATIONS.md)")
+    integ.add_argument("target", choices=["claude", "codex", "agents-md"])
+    integ.add_argument("--write", action="store_true",
+                       help="merge into the config instead of printing: claude -> DIR/.mcp.json (needs --project); "
+                            "codex -> ~/.codex/config.toml, or DIR/.codex/config.toml with --project; "
+                            "agents-md -> DIR/AGENTS.md (default DIR: .)")
+    integ.add_argument("--project", type=Path, default=None, metavar="DIR",
+                       help="project-scoped config in DIR (committable: runs bare `pcp`, not this machine's path)")
+    integ.add_argument("--pcp", default=None, metavar="CMD",
+                       help="command the client runs (default: this pcp's absolute path; `pcp` with --project)")
+    integ.add_argument("--force", action="store_true", help="replace an existing, different pcp entry")
+    integ.set_defaults(func=_dispatch("cmd_integrate", "cmd_integrate"))
+
+    skill = sub.add_parser("skill", help="print a packaged worker skill: the norms provers are given")
+    skill.add_argument("action", choices=["list", "show"])
+    skill.add_argument("name", nargs="?", default=None, help="prover | logatom | invariants | decomposer")
+    skill.set_defaults(func=_dispatch("cmd_integrate", "cmd_skill"))
 
     # ------------------------------------------------------------------ state layer
     trace = sub.add_parser("trace", help="tactic-by-tactic Iris state dump (JSONL)")

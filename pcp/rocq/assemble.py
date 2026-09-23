@@ -38,7 +38,7 @@ class NodeSpec:
     #: The sentence that opens the script.  The anchor keeps the frozen file's own
     #: (``Proof using Hn.``): under ``Set Default Proof Using "Type"`` a proof that
     #: needs a section hypothesis outside its type is valid only with that clause, and
-    #: re-emitting a bare ``Proof.`` rejected every such proof (review finding).
+    #: re-emitting a bare ``Proof.`` would reject every such proof.
     opener: str = "Proof."
 
     @property
@@ -294,8 +294,8 @@ def parse_plan(source: str) -> list[NodeSpec]:
     """Read a plan file: a ``.v`` of child statements, admitted or proved.
 
     Anything that is not a named lemma-like statement is refused rather than
-    dropped: a ``Definition`` a plan silently lost left every child failing to
-    elaborate with no hint why (review finding).
+    dropped: a ``Definition`` a plan silently lost would leave every child failing
+    to elaborate with no hint why.
     """
     specs: list[NodeSpec] = []
     for block in parse_blocks(source):
@@ -322,8 +322,8 @@ def plan_preamble(source: str) -> str:
     """Everything in a plan file before its first declaration -- extra Requires etc.
 
     A scope opener there (``Section``, ``Module``, ``Context``) is refused: the
-    preamble is spliced into every assembly, and an unclosed section broke each
-    of them far from the plan (review finding).
+    preamble is spliced into every assembly, and an unclosed section would break
+    each of them far from the plan.
     """
     blocks = parse_blocks(source)
     text = source if not blocks else source[: blocks[0].statement_start]

@@ -39,7 +39,7 @@ WRAPPERS: frozenset[str] = frozenset({"Fail", "Succeed", "Time", "Timeout"})
 _SET_PRINTING = re.compile(r"(?:Set|Unset)\s+Printing\b")
 
 #: Matched as identifiers outside comments *and strings*: ``idtac "admit"`` is not an
-#: admit, and a regex over comment-stripped text said it was (review finding).
+#: admit, though a regex over comment-stripped text would say it is.
 _FORBIDDEN_TACTICS = ("admit", "give_up")
 _WRAPPER_ARG = re.compile(r"^(?:Fail|Succeed|Time)\s+|^Timeout\s+\d+\s+")
 
@@ -164,9 +164,8 @@ _TRAILING_ENDER = re.compile(r"^(?:Qed|Defined|Admitted)\s*\.$")
 def strip_proof_wrapper(text: str) -> str:
     """Accept a body with or without its ``Proof.``/``Qed.`` wrapper.
 
-    Sentence-based, so a comment before ``Proof.`` or after ``Qed.`` no longer keeps
-    the wrapper in place (review finding: the doubled ``Proof.`` was then blamed on
-    the proof).  Only a *leading* opener and a *trailing* ender are removed; anything
+    Sentence-based, so a comment before ``Proof.`` or after ``Qed.`` does not keep
+    the wrapper in place (a doubled ``Proof.`` would be blamed on the proof).  Only a *leading* opener and a *trailing* ender are removed; anything
     in the middle is left for :func:`validate_body` to reject.
     """
     sents = split_sentences(text)

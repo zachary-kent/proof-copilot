@@ -41,7 +41,9 @@ def attempt_dir(tmp_path: Path, node: str) -> Path:
 
 
 def test_help_and_version():
-    assert run("--version").stdout.strip() == "pcp 0.2.0"
+    from pcp import __version__
+
+    assert run("--version").stdout.strip() == f"pcp {__version__}"
     assert "prove" in run("--help").stdout
     assert run().returncode == 1
 
@@ -216,3 +218,102 @@ def test_pcp_check_on_the_root_node_and_the_design_mode(tmp_path):
     assert ok.returncode == 0, ok.stdout
     design = run("check", "--design", cwd=workdir)
     assert "contract:" in design.stdout and design.returncode in (0, 1)
+
+
+# ---------------------------------------------------------------- init / env / setup / doctor
+
+
+def test_init_writes_the_example_config_and_ignores_run_state_but_not_the_config(tmp_path):
+    from pcp.config.load import EXAMPLE_CONFIG, load
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text("*.vo")
+    done = run("init", cwd=tmp_path)
+    assert done.returncode == 0, done.stderr
+    config = tmp_path / ".pcp" / "config.toml"
+    assert config.read_text() == EXAMPLE_CONFIG and load(config).source == str(config)
+    inner = (tmp_path / ".pcp" / ".gitignore").read_text().splitlines()
+    assert "*" in inner and "!config.toml" in inner and "!.gitignore" in inner
+    assert (tmp_path / ".gitignore").read_text() == "*.vo", "the project's .gitignore is not touched"
+    assert "note:" not in done.stdout
+    config.write_text("# mine\n")
+    again = run("init", cwd=tmp_path)
+    assert again.returncode == 2 and "--force" in again.stderr and config.read_text() == "# mine\n"
+    forced = run("init", "--force", cwd=tmp_path)
+    assert forced.returncode == 0 and config.read_text() == EXAMPLE_CONFIG
+    assert (tmp_path / ".pcp" / ".gitignore").read_text().splitlines() == inner, "idempotent"
+
+
+def test_init_force_preserves_an_existing_configs_mode(tmp_path):
+    import os
+
+    (tmp_path / ".git").mkdir()
+    config = tmp_path / ".pcp" / "config.toml"
+    config.parent.mkdir()
+    config.write_text("# mine\n")
+    config.chmod(0o640)
+    forced = run("init", "--force", cwd=tmp_path)
+    assert forced.returncode == 0
+    assert os.stat(config).st_mode & 0o777 == 0o640
+
+
+def test_init_notes_a_project_gitignore_that_hides_the_config(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text(".pcp/\n")
+    done = run("init", cwd=tmp_path)
+    assert done.returncode == 0 and "will not be tracked" in done.stdout
+
+
+def test_init_outside_git_writes_only_under_pcp(tmp_path):
+    project = tmp_path / "p"
+    project.mkdir()
+    done = run("init", str(project), cwd=tmp_path)
+    assert done.returncode == 0 and (project / ".pcp" / "config.toml").exists()
+    assert not (project / ".gitignore").exists()
+
+
+def test_env_prints_evalable_exports_for_the_switch(tmp_path):
+    import os
+
+    prefix = tmp_path / "opam" / "pcp"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "lib" / "coq" / "user-contrib").mkdir(parents=True)
+    env = {**os.environ, "OPAMROOT": str(tmp_path / "opam"), "PATH": "/usr/bin:/bin"}
+    env.pop("PCP_OPAM_SWITCH", None)
+    done = subprocess.run([sys.executable, "-m", "pcp.cli.main", "env"], cwd=str(tmp_path), env=env,
+                          capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stderr
+    # What `eval "$(pcp env)"` does, in a clean sh: the switch's bin is first on PATH.
+    shell = subprocess.run(["/bin/sh", "-c", done.stdout + '\nprintf "%s\\n%s\\n%s" "$PATH" "$ROCQPATH" "$PCP_OPAM_SWITCH"'],
+                           env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}, capture_output=True, text=True, check=False)
+    path, rocqpath, switch = shell.stdout.splitlines()
+    assert path.split(":")[0] == str(prefix / "bin")
+    assert rocqpath == str(prefix / "lib" / "coq" / "user-contrib") and switch == "pcp"
+    missing = subprocess.run([sys.executable, "-m", "pcp.cli.main", "env", "--switch", "nope"], cwd=str(tmp_path), env=env,
+                             capture_output=True, text=True, check=False)
+    assert missing.returncode == 1 and missing.stdout == "" and "pcp setup" in missing.stderr
+
+
+def test_setup_dry_run_names_the_script_the_pins_and_the_switch(tmp_path):
+    import os
+
+    env = {**os.environ, "OPAMROOT": str(tmp_path / "opam")}
+    done = subprocess.run([sys.executable, "-m", "pcp.cli.main", "setup", "--dry-run", "--switch", "scratch", "--jobs", "2"],
+                          cwd=str(tmp_path), env=env, capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stderr
+    assert "setup-toolchain.sh" in done.stdout and "toolchain.env" in done.stdout
+    assert "would run: opam switch create scratch" in done.stdout and "-j 2" in done.stdout
+    assert not (tmp_path / "opam").exists()
+
+
+def test_doctor_reports_pins_and_packaged_assets_and_points_at_pcp_setup(tmp_path):
+    import os
+
+    env = {**os.environ, "OPAMROOT": str(tmp_path / "opam"), "PATH": "/usr/bin:/bin"}
+    env.pop("PCP_COQC", None)
+    done = subprocess.run([sys.executable, "-m", "pcp.cli.main", "doctor"], cwd=str(tmp_path), env=env,
+                          capture_output=True, text=True, check=False)
+    assert "packaged assets" in done.stdout and "skills/prover.md         ok" in done.stdout
+    assert "coq/IDump.v              ok" in done.stdout and "pinned" in done.stdout
+    if done.returncode != 0:
+        assert "pcp setup" in done.stderr and "setup-toolchain.sh" not in done.stderr and "env.sh" not in done.stderr

@@ -19,7 +19,7 @@ assumed to be guarded/positive`` (``Unset Guard/Positivity Checking``) or by
 `` relies on an unsafe hierarchy`` (``Unset Universe Checking``).  Any other line at
 column 0 inside an ``Axioms:`` block is an assumption too -- one this parser does not
 know -- and is reported as such, never skipped: silently dropping the universe line
-certified a ``Type : Type`` development as clean (review finding).
+would certify a ``Type : Type`` development as clean.
 """
 
 from __future__ import annotations
@@ -138,8 +138,8 @@ def _suffix_match(printed: str, known: str) -> bool:
 
     Rocq prints the shortest unambiguous name, so ``classic`` and
     ``Stdlib.Logic.Classical_Prop.classic`` both match ``Classical_Prop.classic`` --
-    but ``Evil.classic`` does not.  Comparing bare last components let a module's own
-    ``Axiom classic : False`` pass the whitelist (review finding).
+    but ``Evil.classic`` does not.  Comparing bare last components would let a module's
+    own ``Axiom classic : False`` pass the whitelist.
     """
     a, b = printed.split("."), known.split(".")
     n = min(len(a), len(b))

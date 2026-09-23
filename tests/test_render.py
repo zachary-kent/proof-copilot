@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import _ipm_standin  # noqa: F401
-
 from pcp.state.digest import PropStore
 from pcp.state.ipm.model import Hyp, IrisGoal, Modality
 from pcp.state.render import render_goal
@@ -87,3 +85,16 @@ def test_header_flags_store_and_selector_manifest() -> None:
     assert "  … not shown: σ, Hinv" in r.text
     assert store.get(goal.intuitionistic[0].hash) == INV
     assert "[persistent]" in render_goal(goal, select="Hinv").text
+
+
+def test_render_footer_is_honest_under_a_zero_budget() -> None:
+    goal = IrisGoal(
+        goal_id="g0", spatial=[Hyp("Hl", "l ↦ v"), Hyp("H", "∃ x, P x ∗ Q")],
+        intuitionistic=[Hyp("Hinv", "inv N P", klass="intuitionistic")], goal="WP e {{ Φ }}",
+    )
+    r = render_goal(goal, budget=0)
+    assert r.shown == 0 and r.elided == ["Hinv", "Hl", "H"] and r.tokens > 0
+    assert r.text.splitlines()[-1].startswith("rendered 0/3 hypotheses") and "3 elided" in r.text
+    # An explicit selection that does not fit is *elided* (visible), never silently unselected.
+    r = render_goal(goal, budget=5, select="Hl")
+    assert r.elided == ["Hl"] and "Hl" not in r.manifest and "budget exhausted, omitted: Hl" in r.text

@@ -37,7 +37,7 @@ def run_command(func: Command, args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         err("interrupted")
         return 130
-    except SystemExit as exc:  # argparse and legacy callers
+    except SystemExit as exc:  # argparse exits this way
         if exc.code in (0, None):
             return 0
         if isinstance(exc.code, int):

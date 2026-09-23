@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import _ipm_standin  # noqa: F401
 import pytest
 from conftest import needs_petanque
 

@@ -4,10 +4,8 @@ PLAN.md 6 wants an *interactive* runner with a mid-flight channel: ping once (go
 plan, blocker), extend once if the reply shows progress.  That ladder is **not
 implementable for a one-shot CLI** -- ``claude -p`` reads one prompt, runs to
 completion and prints once at exit; there is no second prompt without ``--resume``,
-and resuming *after* a kill is a new attempt, not a ping.  The legacy runner faked it:
-it wrote a marker file the process never read and measured the marker's own mtime as
-"progress", so every worker got the extension and the evidence lied about a ping
-(bugs 3-4 in the runner audit).  This version does not pretend.  The runner gets the
+and resuming *after* a kill is a new attempt, not a ping.  So the runner does not
+pretend to ping (a marker file the process never reads is not progress).  It gets the
 whole budget in ONE ``run_async`` call (no cancelled ``communicate()`` that drops the
 buffered output) and is otherwise the headless runner with the single-object output
 format, which is what an operator inside a Claude Code session gets for free.

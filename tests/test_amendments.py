@@ -740,7 +740,7 @@ def test_design_evidence_quotes_amendment_requests_for_the_decomposer():
     assert "x asked for the design to change: `d` to be restated" in text and "requests, not decisions" in text
 
 
-# --- review findings (wave 4 adversarial pass) ---------------------------------------------
+# --- adversarial amendments -----------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -954,8 +954,8 @@ class WholeFileGate(FakeGate):
         return result
 
 def test_revalidate_blames_a_sound_proof_for_a_later_siblings_broken_body(tmp_path, monkeypatch):
-    """Reproduced with coqc: `unaffected : P -∗ P` was reopened because `proof_uses`, later
-    in plan order and broken by the amendment, was injected with its body into
+    """A sound proof (`unaffected : P -∗ P`) is not reopened because `proof_uses`, later in
+    plan order and broken by the amendment, would be injected with its body into
     `unaffected`'s replay file (`stub_prefix` stubs only the file's own proofs)."""
     monkeypatch.setattr(amend_mod, "apply_design", fake_apply_design)
     graph, root, dev = synthetic_graph(tmp_path)
@@ -1002,8 +1002,8 @@ End amend.
 
 # `proof_uses` is placed before `unaffected` on purpose: `revalidate` replays proved
 # nodes in plan order with the *not yet replayed* siblings' bodies injected, so a
-# broken body late in the order fails the compile of every replay before it (handoff
-# finding, `test_revalidate_blames_a_sound_proof_for_a_later_siblings_broken_body`).
+# broken body late in the order fails the compile of every replay before it
+# (`test_revalidate_blames_a_sound_proof_for_a_later_siblings_broken_body`).
 IRIS_PLAN = """Lemma close_inv (n : nat) : ⌜n = 0⌝ -∗ amend_inv n.
 Proof. Admitted.
 
@@ -1110,11 +1110,11 @@ class VacuousProver(AskingRunner):
 
 @needs_rocq
 def test_a_real_vacuous_add_is_stopped_by_the_approver_and_only_the_report_without_one(tmp_path):
-    """Review finding: `add` was auto-accepted as a machine-checked strengthening, but a
-    stronger *hypothesis* is a weaker theorem -- `amend_main` is false as designed and
-    integrated with a clean `Print Assumptions`.  With an approver configured the add is
-    reviewed and the rejection buys the prover its ordinary retry; without one it is
-    applied and the report line says so, because the human reading it is the auditor."""
+    """`add` is not a machine-checked strengthening: a stronger *hypothesis* is a weaker
+    theorem, so a vacuous add makes `amend_main` false as designed yet integrated with a
+    clean `Print Assumptions`.  With an approver configured the add is reviewed and the
+    rejection buys the prover its ordinary retry; without one it is applied and the report
+    line says so, because the human reading it is the auditor."""
     from tests.test_adjudication import ScriptedRunner, canned
 
     def corpus_at(base: Path) -> Path:
@@ -1210,8 +1210,8 @@ def test_only_a_human_may_contest_a_stuck_node(tmp_path):
 
 
 def test_a_node_reviewed_at_one_epoch_is_reviewed_again_at_the_next_within_the_same_run(tmp_path):
-    """Review finding: the per-run memo was keyed by node id, so a node reopened at
-    epoch+1 by a strategy verdict could never be reviewed again and wedged stuck."""
+    """The per-run review memo is keyed by (node, epoch): a node reopened at epoch+1 by a
+    strategy verdict is reviewed again instead of wedging stuck."""
     graph, root, dev = synthetic_graph(tmp_path)
     graph.set_proof_status(node_id("stuck_free"), "open")
     graph.set_proof_status(node_id("stuck_free"), "claimed")
@@ -1296,9 +1296,9 @@ def test_a_rejected_restatement_on_a_reviewed_node_contests_it(tmp_path):
 
 
 def test_verdict_driven_reopenings_are_bounded(tmp_path):
-    """Review finding: a strategy-always approver and a stuck-always prover cycled
-    forever (2 attempts + 1 verdict per epoch).  After MAX_VERDICT_REOPENS the epoch
-    counts as reviewed and the budget is spent normally."""
+    """A strategy-always approver and a stuck-always prover do not cycle forever (2
+    attempts + 1 verdict per epoch): after MAX_VERDICT_REOPENS the epoch counts as
+    reviewed and the budget is spent normally."""
     from pcp.orch.prove.amendments import MAX_VERDICT_REOPENS
 
     graph, root, dev = synthetic_graph(tmp_path)
@@ -1323,8 +1323,8 @@ def test_verdict_driven_reopenings_are_bounded(tmp_path):
 
 
 def test_a_fix_applied_with_a_rejected_restatement_reopens_instead_of_crashing(tmp_path, monkeypatch):
-    """Review finding: the fix reopened the node, then the rejected restatement fell
-    through to `stuck -> contested` on an open node -- an InvalidTransition that killed the run."""
+    """A fix reopens the node; the rejected restatement that came with it must not then
+    move the open node `stuck -> contested` (an InvalidTransition that would end the run)."""
     import pcp.orch.prove.amendments as mod
 
     graph, root, dev = synthetic_graph(tmp_path)

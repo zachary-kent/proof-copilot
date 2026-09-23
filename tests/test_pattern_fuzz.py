@@ -268,3 +268,11 @@ def test_pattern_parser_accepts_the_ampersand_sugar() -> None:
 def test_actions_and_clears_never_mismatch() -> None:
     for text in ("//", "/=", "!>", "*", "**", "{H1}", "{$H1}", "$", "_", "?"):
         assert align(text, "P ∗ Q").ok, text
+
+
+def test_a_pattern_nested_past_the_stack_is_a_syntax_error_not_a_crash() -> None:
+    for text in ("[" * 5000 + "H" + "]" * 5000, "#" * 5000 + "H", "[H " * 3000 + "H" + "]" * 3000):
+        with pytest.raises(PatternSyntaxError):
+            parse_pattern(text)
+        with pytest.raises(PatternSyntaxError):
+            align(text, "P ∗ Q")

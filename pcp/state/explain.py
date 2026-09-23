@@ -7,8 +7,8 @@ tactic.  It rides on the command every worker already runs, so it costs no turn.
 
 Locating is by the error's **character offset** (``CompileResult.error_location``,
 which ignores located warnings), not by the node under test and not by the line's
-start (legacy bugs: a warning's location was taken for the error's; one-line proofs
-were never found).  A Qed-time error (``Attempt to save an incomplete proof``) is
+start (so a warning's location is never taken for the error's, and one-line proofs
+are found).  A Qed-time error (``Attempt to save an incomplete proof``) is
 located on the ender line and maps to the body before it.
 
 The replay opens a twin ``<stem>__pcpexplain.v`` written atomically and removed
@@ -227,7 +227,7 @@ def _replay(
         from pcp.state.pool import SessionPool
 
         # The wall budget is the worker's clock: `petanque/start` on the twin is bounded
-        # by it too (v1 left the 600 s default, so a wedged start ate ten minutes).
+        # by it too, not by petanque's 600 s default.
         pool = SessionPool(twin.parent, size=1, start_timeout=max(60.0, budget_seconds))
     ran = 0
     try:

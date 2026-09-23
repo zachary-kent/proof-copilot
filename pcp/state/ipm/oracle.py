@@ -13,8 +13,8 @@ The answers are decoded from Iris's exact failure prefixes (``ltac_tactics.v``):
 not absorbing`` means the persistence check *passed* and the affinity one failed.
 Anything else leaves the field ``None`` -- unknown, never guessed (PLAN.md 4.4).
 
-``state`` is required: v1 defaulted to "wherever the session is now", and ``pcp trace
---oracle`` then probed every historical step against the final state.
+``state`` is required: defaulting to "wherever the session is now" would make ``pcp
+trace --oracle`` probe every historical step against the final state.
 """
 
 from __future__ import annotations

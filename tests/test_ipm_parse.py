@@ -1,13 +1,15 @@
 """The printer parser, the dump reader, the Timeout rule and the trace artifact -- offline.
 
-Every scenario here is a v1 bug named in ``bugs-state-petanque.md``; the test name says
-which.  Nothing needs Rocq: the inputs are the exact strings petanque returned (kept
-verbatim from the verified experiments).
+Each test name says the behaviour it pins.  Nothing needs Rocq: the inputs are the
+exact strings petanque returned, kept verbatim.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -17,8 +19,9 @@ from pcp.state.ipm.model import IrisGoal, Step, scan_modality
 from pcp.state.ipm.parse import goals_from_petanque, looks_like_ipm, parse_coq_hyp_block, parse_goal
 from pcp.state.ipm.reflect import clean_body, goal_from_dump, parse_dump
 from pcp.state.petanque import PetProcess, StateHandle, coq_timeout, pet_wrapper, wrap_timeout
-from pcp.state.session import _single_tactic
-from pcp.state.trace import Trace
+from pcp.state.session import StepResult, _single_tactic
+from pcp.state.trace import Trace, Tracer
+from pcp.util.proc import run
 
 BOTH = (
     '"Hinv" : inv N P\n'
@@ -59,7 +62,7 @@ def test_all_four_separator_shapes() -> None:
 
 
 def test_anonymous_hypotheses_are_not_dropped_or_glued() -> None:
-    """v1 required a leading quote: `_ : P` vanished or became a continuation line."""
+    """No leading quote is required: `_ : P` is a hypothesis, not a continuation line."""
     g = parse_goal(ANON)
     assert [h.id for h in g.intuitionistic] == ["_1"]
     assert g.intuitionistic[0].anonymous and g.intuitionistic[0].prop == "steps_lb n"
@@ -114,7 +117,7 @@ def test_goals_from_petanque_accepts_objects_dicts_and_pairs() -> None:
 
 
 def test_full_render_coq_context_in_both_shapes_and_unicode_names() -> None:
-    """v1 searched the `====` line only in the □ block and required ASCII names."""
+    """The `====` line is found in either block, and names need not be ASCII."""
     star = parse_goal('x : nat\nσ : state Λ\n====\n"H" : P\n---∗\nQ')
     assert [h.id for h in star.pure] == ["x", "σ"] and [h.id for h in star.spatial] == ["H"]
     box = parse_goal('γ : gname\n====\n"H" : P\n---□\nQ')
@@ -131,6 +134,9 @@ def test_modality_is_read_at_the_head_only() -> None:
     assert scan_modality("WP e @ s; E [{ v, Φ v }]").wp.total  # type: ignore[union-attr]
     assert scan_modality("▷?q ▷ P").laters == 2 and scan_modality("▷^n P").laters == 1
     assert scan_modality("⌜wp = 1⌝").wp is None
+    assert scan_modality("P -∗ |={⊤}=> Q").mask is None
+    twp = scan_modality("WP e @ NotStuck; ⊤ ∖ ↑N [{ Φ }]")
+    assert twp.wp is not None and twp.wp.total and twp.mask == "⊤ ∖ ↑N"
 
 
 # ------------------------------------------------------------------- reflect
@@ -195,10 +201,19 @@ def test_timeout_wrapper_rule() -> None:
     assert _single_tactic("-") is None
 
 
+def test_wrap_timeout_skips_bullets_braces_and_already_timed_sentences() -> None:
+    src = '- iIntros "H". { iFrame. } 2: { done. } all: idtac. Timeout 3 idtac. } + idtac...'
+    text, n = wrap_timeout(src, 5)
+    assert text == (
+        '- Timeout 5 iIntros "H". { Timeout 5 iFrame. } 2: { Timeout 5 done. } Timeout 5 all: idtac. '
+        "Timeout 3 idtac. } + Timeout 5 idtac..."
+    )
+    assert n == 5
+
+
+
 def test_wrapper_script_is_atomic_per_uid_and_has_no_pdeathsig(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    import tempfile
-
     tempfile.tempdir = None
     try:
         fake = tmp_path / "pet"
@@ -214,6 +229,28 @@ def test_wrapper_script_is_atomic_per_uid_and_has_no_pdeathsig(tmp_path: Path, m
         assert pet_wrapper(str(fake), 1234) == wrapper
     finally:
         tempfile.tempdir = None
+
+
+def test_wrapper_is_created_atomically_under_concurrent_cold_starts() -> None:
+    """Twelve cold processes create the same wrapper at once and every one execs it."""
+    limit = 100_000 + os.getpid() % 50_000
+    root = Path(tempfile.gettempdir()) / f"pcp-pet-{os.getuid()}-{limit}"
+    shutil.rmtree(root, ignore_errors=True)
+    code = (
+        "from pcp.state.petanque import pet_wrapper; from pcp.util.proc import run; "
+        f"w = pet_wrapper('/bin/echo', {limit}); print(run([str(w), 'hi']).stdout.strip())"
+    )
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+    try:
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            results = list(pool.map(lambda _: run([os.sys.executable, "-c", code], env=env, timeout=60), range(12)))
+        assert all(r.ok and r.stdout.strip() == "hi" for r in results), [(r.returncode, r.stderr[-200:]) for r in results]
+        wrapper = pet_wrapper("/bin/echo", limit)
+        assert wrapper.parent == root and oct(wrapper.parent.stat().st_mode & 0o777) == "0o700"
+        assert os.access(wrapper, os.X_OK) and str(os.getuid()) in str(wrapper)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
 
 
 def test_state_handles_never_cross_processes_or_generations() -> None:
@@ -273,13 +310,51 @@ def test_trace_jsonl_round_trip_matches_the_contract(tmp_path: Path) -> None:
     assert again.live_spatial() == ["HP", "HQ"] and again.dumps() == trace.dumps()
 
 
-def test_trace_reader_tolerates_legacy_lines_without_rec() -> None:
+def test_trace_reader_tolerates_older_lines_without_rec_or_confidence() -> None:
     text = (
         '{"v": 1, "file": "/f.v", "thm": "t", "props": {}}\n'
         '{"step": 0, "state_id": 1, "tactic": "<start>", "goals": []}\n'
         '{"step": 1, "kind": "Intro", "tactic": "x.", "goal_id": "g0", "hyp": "H", "sources": [], "targets": [], "detail": "", "confidence": "certain", "klass": "spatial"}\n'
+        '{"step": 1, "kind": "Consume", "tactic": "iFrame.", "hyp": "H"}\n'
     )
     trace = Trace.loads(text)
-    assert len(trace.steps) == 1 and len(trace.events) == 1
+    assert len(trace.steps) == 1 and [e.kind for e in trace.events] == ["Intro", "Consume"]
     with pytest.raises(ValueError):
         Trace.loads('{"step": 0, "state_id": 1, "tactic": "x"}\n')
+
+
+def test_step_messages_survive_the_jsonl_round_trip() -> None:
+    step = Step(1, 2, "iDump.", [], messages=['PCP1\tspatial\t(INamed "H")\tP'])
+    assert Step.from_json(step.to_json()).messages == step.messages
+    assert "messages" not in Step(1, 2, "idtac.", []).to_json()
+
+
+class _FakeSession:
+    source_file = file = "/nowhere/F.v"
+    thm = "t"
+
+    def __init__(self) -> None:
+        self.n = 1
+
+    def start(self) -> StateHandle:
+        return StateHandle(process=1, generation=0, st=1, state_hash=1)
+
+    def run(self, tactic: str, *, timeout: float | None = None) -> StepResult:
+        if tactic == "bad.":
+            return StepResult(ok=False, error="Coq: no", tactic=tactic)
+        self.n += 1
+        return StepResult(ok=True, state=StateHandle(1, 0, self.n, state_hash=self.n), state_hash=self.n, tactic=tactic)
+
+    def goals(self, state: StateHandle | None = None) -> list:
+        return []
+
+
+def test_a_later_success_clears_the_trace_error_but_keeps_the_failed_step() -> None:
+    tracer = Tracer(_FakeSession())  # type: ignore[arg-type]
+    tracer.start()
+    tracer.start()  # idempotent: one step 0, never a second `<start>` step
+    assert [s.step for s in tracer.trace.steps] == [0]
+    assert not tracer.step("bad.").ok and tracer.trace.failed_at == 1 and tracer.trace.error
+    assert tracer.step("idtac.").ok
+    assert tracer.trace.failed_at is None and tracer.trace.error is None
+    assert [s.ok for s in tracer.trace.steps] == [True, False, True] and tracer.trace.steps[2].step == 2
