@@ -78,6 +78,9 @@ def test_status_and_handoff_on_a_canary_graph(tmp_path):
     missing = run("status", "--graph", str(tmp_path / "nope.db"), cwd=tmp_path)
     assert missing.returncode == 2 and "no graph at" in missing.stderr
     assert not (tmp_path / "nope.db").exists(), "a wrong path never creates a graph"
+    quiet = run("status", "--missing-ok", "--graph", str(tmp_path / "nope.db"), cwd=tmp_path)
+    assert quiet.returncode == 0 and "no pcp run in this project yet" in quiet.stdout
+    assert not (tmp_path / "nope.db").exists()
     unknown = run("handoff", "nobody", "--graph", str(graph), cwd=tmp_path)
     assert unknown.returncode == 2 and "no node 'nobody'" in unknown.stderr
 

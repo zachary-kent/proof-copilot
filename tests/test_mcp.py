@@ -324,7 +324,7 @@ class TestLive:
         # A failed step costs a step number but does not move the session.
         state = server.proof_state(sid, step=1)
         assert state["ok"] is False and state["error"] == out["error"] and state["step"] == 1
-        good = server.proof_step(sid, 'iIntros "[[HP HQ] HR]".')
+        good = server.proof_step(sid, 'iIntros "[[HP HQ] HR]"')  # no period: the server adds it
         assert good["ok"] is True and good["loop_of"] is None and good["proof_finished"] is False
         assert {e["kind"] for e in good["ledger"]} == {"Intro"} and {e["hyp"] for e in good["ledger"]} == {"HP", "HQ", "HR"}
         assert "spatial ∗" in good["goal"][0] and '"HR" : R' in good["goal"][0]

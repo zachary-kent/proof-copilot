@@ -45,6 +45,7 @@ from pcp.mcp.names import MAX_TOOLS, MCP_SERVER_NAME, TOOLS
 from pcp.rocq.assemble import Development, parse_plan
 from pcp.rocq.body import strip_proof_wrapper
 from pcp.rocq.decls import find_block
+from pcp.rocq.lexer import terminate_sentence
 from pcp.state.diagnose import diagnose
 from pcp.state.ipm.model import IrisGoal, Step
 from pcp.state.ipm.pattern import DestructSpec, compile_auto, compile_spec
@@ -312,6 +313,7 @@ class PcpServer:
         budget: int = DEFAULT_STEP_BUDGET,
     ) -> dict[str, Any]:
         rec = self.record(session)
+        tactic = terminate_sentence(tactic)
         with rec.lock:
             before = rec.final_goals
             if mode == "speculative":
@@ -434,7 +436,7 @@ class PcpServer:
     def proof_try(self, session: str, tactics: list[str]) -> dict[str, Any]:
         """Speculative fan-out: near-free on a flat-rate tier, so spend it (PLAN.md 7)."""
         rec = self.record(session)
-        batch = [str(t) for t in list(tactics)[:MAX_TRY]]
+        batch = [terminate_sentence(str(t)) for t in list(tactics)[:MAX_TRY]]
         with rec.lock:
             results = rec.session.try_many(batch)
         return {

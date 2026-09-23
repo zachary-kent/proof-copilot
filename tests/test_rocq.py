@@ -190,3 +190,25 @@ def test_plan_preamble_refuses_scopes_and_parse_plan_refuses_definitions():
     with pytest.raises(UsageError, match="not an obligation"):
         parse_plan("Definition helper := 0.\nLemma c : helper = 0.\nProof. Admitted.\n")
     assert [s.name for s in parse_plan("Lemma a : True.\nProof. Admitted.\nTheorem b : True.\nProof. exact I. Qed.\n")] == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    ("tactic", "sent"),
+    [
+        ('iIntros "[HP HQ]"', 'iIntros "[HP HQ]".'),
+        ('iIntros "[HP HQ]".  ', 'iIntros "[HP HQ]".'),
+        ("iFrame. iApply foo", "iFrame. iApply foo."),
+        ('iExact "H" (* done *)', 'iExact "H" (* done *).'),
+        ('idtac "a. b"', 'idtac "a. b".'),
+        ("-", "-"),
+        ("++", "++"),
+        ("{", "{"),
+        ("2: {", "2: {"),
+        ("}", "}"),
+        ("", ""),
+    ],
+)
+def test_terminate_sentence_adds_only_a_missing_final_period(tactic, sent):
+    from pcp.rocq.lexer import terminate_sentence
+
+    assert terminate_sentence(tactic) == sent

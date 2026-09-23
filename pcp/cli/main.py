@@ -119,6 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="one-screen summary of the graph")
     status.add_argument("--graph", type=Path, default=DEFAULT_GRAPH)
     status.add_argument("--json", action="store_true")
+    status.add_argument("--missing-ok", action="store_true",
+                        help="report a project with no graph yet and exit 0 instead of failing")
     status.set_defaults(func=_dispatch("cmd_status", "cmd_status"))
 
     handoff = sub.add_parser("handoff", help="emit a .v for a stuck node, with evidence as comments")

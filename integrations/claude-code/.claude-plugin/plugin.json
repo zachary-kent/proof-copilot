@@ -1,7 +1,7 @@
 {
   "name": "proof-copilot",
   "displayName": "proof-copilot",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "The pcp MCP proof-state tools for Rocq/Iris, plus skills for driving pcp runs, debugging Iris proofs by hand, and first-run setup. Needs the pcp CLI installed separately.",
   "author": {
     "name": "Zak Kent",

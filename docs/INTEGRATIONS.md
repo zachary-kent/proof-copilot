@@ -134,6 +134,11 @@ AGENTS.md block is the supported route.
 
 ## Troubleshooting
 
+- **A plugin command or skill fails with a pcp usage error.** The plugin is newer than the
+  installed pcp. Reinstall pcp at the latest tag (`pcp --version` should match the plugin's
+  version in `/plugin`).
+- **In headless `claude -p`, a skill or pcp tool call is refused.** Headless sessions deny
+  anything that would prompt; pass `--allowedTools "Skill mcp__plugin_proof-copilot_pcp"`.
 - **The server is "failed" in `/mcp`, or Codex says it cannot start `pcp`.** The client's
   PATH does not contain pcp. This happens when it was started from a GUI, a harness,
   or a shell without `~/.local/bin`. Either start the client from a shell where

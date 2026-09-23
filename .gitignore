@@ -18,3 +18,5 @@ _build/
 tests/goldens/shard_*.jsonl
 .lia.cache
 .nia.cache
+build/
+dist/

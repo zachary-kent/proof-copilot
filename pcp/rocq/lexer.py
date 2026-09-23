@@ -261,3 +261,15 @@ def has_top_level_token(code: str, token: str) -> bool:
             return True
         i += 1
     return False
+
+
+def terminate_sentence(tactic: str) -> str:
+    """``tactic`` with its final sentence terminated: an MCP client sends one tactic and
+    often omits the ``.``, which Rocq reports as an opaque syntax error.  Bullets and
+    goal braces need no period; a sentence that already ends in one is left alone."""
+    stripped = tactic.rstrip()
+    sentences = split_sentences(stripped)
+    last = sentences[-1].text.strip() if sentences else stripped
+    if not last or last.endswith((".", "{", "}")) or set(last) <= set(_BULLET_CHARS):
+        return stripped
+    return stripped + "."

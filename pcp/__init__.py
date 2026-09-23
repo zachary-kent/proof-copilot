@@ -12,4 +12,4 @@ The daily loop (``pcp prove``) must run on a machine where the only Rocq binary 
 enforces that.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

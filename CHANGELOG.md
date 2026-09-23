@@ -5,6 +5,20 @@ All notable changes to proof-copilot. The format follows
 [Semantic Versioning](https://semver.org/). Install a release with
 `uv tool install --python 3.11 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@vX.Y.Z'`.
 
+## [0.3.1] - 2026-09-23
+
+Found by driving the Claude Code plugin from a real install.
+
+### Fixed
+- `/proof-copilot:status` failed outright in a project with no run yet: `pcp status`
+  exited non-zero, which aborts a command's shell injection. New `pcp status --missing-ok`
+  reports "no pcp run in this project yet" and exits 0; the plugin command uses it.
+- The `proof_step` and `proof_try` MCP tools add a missing final `.` to a tactic (bullets
+  and goal braces excepted) instead of returning Rocq's opaque syntax error.
+
+Keep pcp and the plugin on the same version: the plugin is served from `master`, and
+its commands call pcp flags that older releases lack.
+
 ## [0.3.0] - 2026-09-23
 
 Packaging: an installed copy now behaves exactly like a checkout.

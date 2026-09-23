@@ -50,6 +50,12 @@ def render_status(graph: Graph) -> str:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    graph_path = absolute(args.graph)
+    if args.missing_ok and graph_path is not None and not graph_path.exists():
+        # A project that has never run `pcp prove` is a normal state for a caller that
+        # only reports (the Claude Code plugin's status command), not an error.
+        print(f"no pcp run in this project yet (no graph at {graph_path}); start one with `pcp prove`")
+        return 0
     graph = _open(args.graph)
     try:
         if args.json:
