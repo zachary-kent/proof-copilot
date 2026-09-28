@@ -122,7 +122,7 @@ def test_trace_writes_jsonl_and_state_and_ledger_read_it_back(tmp_path: Path, ca
     assert rows[0]["rec"] == "header" and rows[0]["finished"] is True and rows[0]["failed_at"] is None
     steps = [r for r in rows if r["rec"] == "step"]
     events = [r for r in rows if r["rec"] == "event"]
-    assert [s["tactic"] for s in steps][:2] == ["<start>", 'iIntros "H".'] and len(steps) == int(m.group(1))
+    assert [s["tactic"] for s in steps][:2] == ["<start>", 'iIntros "H".'] and len(steps) - 1 == int(m.group(1)), "the count is sentences run; row 0 is the root"
     assert len(events) == int(m.group(2)) > 0 and {e["hyp"] for e in events if e["kind"] == "Intro"} >= {"H"}
     assert not (SCRATCH / "Basic__pcpfast.v").exists()
 
@@ -151,8 +151,8 @@ def test_trace_default_output_and_a_script_that_stops(tmp_path: Path, capsys) ->
     assert main(["trace", str(BASIC), "sep_comm", "--script", str(script)]) == 0
     captured = capsys.readouterr()
     default = tmp_path / ".pcp" / "traces" / "Basic.sep_comm.jsonl"
-    assert default.exists() and captured.out.startswith("4 steps,")
-    assert captured.err.startswith("stopped at step 3: ")
+    assert default.exists() and captured.out.startswith("3 steps,")
+    assert captured.err.startswith("stopped at step 3 `done.`: "), "the failing sentence is named (issue 11)"
     rows = _rows(default)
     steps = [r for r in rows if r["rec"] == "step"]
     assert [s["tactic"] for s in steps] == ["<start>", 'iIntros\n  "[HP HQ]".', 'iSplitL "HP".', "done."]
@@ -198,7 +198,7 @@ def test_trace_reflect_really_reads_through_idump(tmp_path: Path, monkeypatch, c
     monkeypatch.setattr("pcp.cli.cmd_trace.DEFAULT_COQ_ROOT", root)
     out = tmp_path / "reflect.jsonl"
     assert main(["trace", str(BASIC), "load_twice", "--reflect", "-o", str(out)]) == 0
-    assert capsys.readouterr().out.startswith("7 steps,")
+    assert capsys.readouterr().out.startswith("6 steps,")
     assert dict(os.environ) == before
     steps = [r for r in _rows(out) if r["rec"] == "step"]
     assert steps[1]["goals"][0]["spatial"][0]["prop"] == "l ↦ v" and steps[-1]["goals"] == []

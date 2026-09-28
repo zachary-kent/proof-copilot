@@ -24,7 +24,8 @@ from pcp.orch.graph import Graph
 from pcp.orch.model import PROVED_STATUSES, Node
 from pcp.rocq.assemble import Development, NodeSpec
 from pcp.rocq.decls import parse_blocks
-from pcp.util.io import atomic_write_text, copy_if_exists, ensure_dir
+from pcp.rocq.project import write_portable_project
+from pcp.util.io import atomic_write_text, ensure_dir
 
 
 def obligations(graph: Graph, dev: Development) -> list[Node]:
@@ -98,7 +99,7 @@ def export_solution(
     out_dir = ensure_dir(Path(recorder.root) / "solution")
     target = out_dir / dev.path.name
     atomic_write_text(target, solution_header(root.name, integrated, proved, open_, admitted) + text)
-    copy_if_exists(dev.path.parent / "_CoqProject", out_dir / "_CoqProject")
+    write_portable_project(dev.path, out_dir)
     return target
 
 

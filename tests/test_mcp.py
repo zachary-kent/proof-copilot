@@ -21,6 +21,7 @@ from conftest import SCRATCH, needs_petanque, needs_rocq, petanque_available
 from pcp import __version__
 from pcp.errors import StateError, ToolchainError, UsageError
 from pcp.mcp.names import MAX_TOOLS, TOOLS, mcp_tool_name
+from pcp.mcp.result import BLOCK_KEYS
 from pcp.mcp.server import (
     LOST_ACTION,
     ParentWatch,
@@ -51,8 +52,8 @@ def _has_mcp() -> bool:
 # ------------------------------------------------------------------- offline
 
 
-def test_the_tool_surface_is_exactly_ten_and_namespaced(tmp_path: Path) -> None:
-    assert len(TOOLS) == 10 <= MAX_TOOLS and len(set(TOOLS)) == 10
+def test_the_tool_surface_is_capped_and_namespaced(tmp_path: Path) -> None:
+    assert len(TOOLS) == 14 <= MAX_TOOLS and len(set(TOOLS)) == 14
     assert "prove_this_lemma" not in TOOLS and "fix_this_proof" not in TOOLS
     fns = tool_functions(PcpServer(tmp_path))
     assert tuple(fns) == TOOLS
@@ -103,14 +104,25 @@ def test_every_tool_answers_json_on_bad_input(tmp_path: Path) -> None:
         "proof_destruct": ("s9", "H"),
         "premise_search": ("s9",),
         "notation_resolve": ("s9", "+"),
+        "proof_close": ("s9",),
+        "proof_expect": ("s9", "True"),
+        "proof_inv": ("s9", "Hinv"),
+        "diagnosis_feedback": ("nope",),
     }
+    assert set(calls) == set(TOOLS)
     for name, args in calls.items():
         out = json.loads(fns[name](*args))
-        assert "error" in out, name
-        if args[0] == "s9":
-            assert out == {"error": "no session 's9'; call proof_open first"}, name
+        assert list(out)[:5] == list(BLOCK_KEYS) and out["ok"] is False and out["error"], name
+        assert out["what"] and out["next"] and out["where"] is None and out["goal"] is None, name
+        if name == "proof_close":
+            assert out["error"].startswith("no session 's9'"), name
+        elif args[0] == "s9":
+            assert out["error"] == "no session 's9'; call proof_open first", name
+            assert "proof_open" in out["next"][0], name
+        elif name == "diagnosis_feedback":
+            assert "no diagnosis 'nope'" in out["error"]
         else:
-            assert "nope.v" in out["error"], name
+            assert "nope.v" in out["error"] and "workspace" in out["next"][0], name
     server.close()
 
 
@@ -124,7 +136,8 @@ def _fake_record(sid: str, goal: IrisGoal, *, step_raises: Exception | None = No
         raise AssertionError("unexpected step")
 
     tracer = SimpleNamespace(trace=trace, step=step)
-    return SessionRecord(sid, session=SimpleNamespace(), tracer=tracer)  # type: ignore[arg-type]
+    session = SimpleNamespace(source_file="x.v", thm="t", pool=None)
+    return SessionRecord(sid, session=session, tracer=tracer)  # type: ignore[arg-type]
 
 
 def test_destruct_spec_unknown_key_is_an_error_object_not_a_traceback(tmp_path: Path) -> None:
@@ -132,10 +145,13 @@ def test_destruct_spec_unknown_key_is_an_error_object_not_a_traceback(tmp_path: 
     goal = IrisGoal(goal_id="g0", spatial=[Hyp(id="H", prop="P ∗ Q")], goal="Q ∗ P")
     server._sessions["s1"] = _fake_record("s1", goal)
     bad = server.proof_destruct("s1", "H", spec={"pattern": "[A B]"})
-    assert set(bad) == {"error"} and "unknown destruct spec key" in bad["error"] and "pattern" in bad["error"]
+    assert bad["ok"] is False and "unknown destruct spec key" in bad["error"] and "pattern" in bad["error"]
+    assert set(bad) == {*BLOCK_KEYS, "error"}
     assert "error" in server.proof_destruct("s1", "H", spec="[A B]")  # type: ignore[arg-type]
     auto = server.proof_destruct("s1", "H")
     assert auto["tactic"] == 'iDestruct "H" as "[H1 H2]".' and auto["binders"] == []
+    assert auto["ok"] is True and auto["what"] == 'compiled iDestruct "H" as "[H1 H2]".'
+    assert auto["next"][0] == 'proof_step("s1", "iDestruct \\"H\\" as \\"[H1 H2]\\".") runs it'
     named = server.proof_destruct("s1", "H", spec={"names": ["HP", "HQ"]})
     assert named["tactic"] == 'iDestruct "H" as "[HP HQ]".'
     missing = server.proof_destruct("s1", "nope")
@@ -150,14 +166,22 @@ def test_a_lost_session_is_never_reported_as_a_tactic_failure(tmp_path: Path) ->
         "s1", goal, step_raises=StateError("session t was lost when petanque restarted; call proof_open again")
     )
     out = server.proof_step("s1", "iFrame.")
-    assert out == {"ok": False, "error": "session t was lost when petanque restarted; call proof_open again",
-                   "lost": True, "action": LOST_ACTION}
+    lost = {k: out[k] for k in ("ok", "error", "lost", "action", "timed_out")}
+    assert lost == {"ok": False, "error": "session t was lost when petanque restarted; call proof_open again",
+                    "lost": True, "action": LOST_ACTION, "timed_out": False}
+    assert "not a tactic failure" in out["what"] and "proof_open" in out["next"][0]
     assert "diagnosis" not in out
     server._sessions["s2"] = _fake_record("s2", goal, step_raises=RuntimeError("boom"))
-    assert server.proof_step("s2", "iFrame.") == {"error": "RuntimeError: boom"}
-    assert server.proof_state("s1", step=7) == {"error": "no step 7"}
-    assert server.proof_ledger("s1", "blame") == {"error": "hyp is required"}
+    boom = server.proof_step("s2", "iFrame.")
+    assert boom["ok"] is False and boom["error"] == "RuntimeError: boom" and "internal error" in boom["what"]
+    assert server.proof_state("s1", step=7)["error"] == "no step 7"
+    assert server.proof_ledger("s1", "blame")["error"] == "hyp is required"
     assert "unknown query" in server.proof_ledger("s1", "what")["error"]
+    # A call that ran out of its wall clock is `timed_out` as well as lost.
+    server._sessions["s3"] = _fake_record("s3", goal, step_raises=StateError(
+        "petanque call `run` exceeded its 45 s wall clock; the process was killed and every state it held is gone"))
+    slow = server.proof_step("s3", "iFrame.")
+    assert slow["lost"] is True and slow["timed_out"] is True and "wall clock" in slow["what"]
 
 
 def test_default_blame_step_is_the_failed_step_else_the_next_one() -> None:
@@ -225,6 +249,10 @@ SDK_BAD_INPUT = {
     "proof_destruct": {"session": "s9", "hyp": "H", "spec": {"names": ["a"]}},
     "premise_search": {"session": "s9"},
     "notation_resolve": {"session": "s9", "token": "+"},
+    "proof_close": {"session": "s9"},
+    "proof_expect": {"session": "s9", "expected": "True"},
+    "proof_inv": {"session": "s9", "inv": "Hinv"},
+    "diagnosis_feedback": {"diagnosis_id": "nope"},
 }
 
 
@@ -261,7 +289,7 @@ def test_the_server_survives_every_bad_call_through_the_sdk_client(tmp_path: Pat
 
                     seen["bad_input"] = {name: await call(name, args) for name, args in SDK_BAD_INPUT.items()}
                     # A fault *inside* a guarded tool is a JSON error object, not a protocol error.
-                    monkeypatch.setattr(PcpServer, "_pool_for", lambda self, *, reflect: (_ for _ in ()).throw(RuntimeError("kaboom")))
+                    monkeypatch.setattr(PcpServer, "_pool_for", lambda self, **_: (_ for _ in ()).throw(RuntimeError("kaboom")))
                     (tmp_path / "x.v").write_text("Lemma x : True.\nProof. exact I. Qed.\n", encoding="utf-8")
                     seen["raise"] = await call("proof_open", {"file": "x.v", "lemma": "x"})
                     seen["after"] = await call("proof_state", {"session": "s9"})
@@ -281,10 +309,11 @@ def test_the_server_survives_every_bad_call_through_the_sdk_client(tmp_path: Pat
         assert not is_error, name
         assert "error" in json.loads(text), name
     is_error, text = seen["raise"]
-    assert not is_error and json.loads(text) == {"error": "RuntimeError: kaboom"}
-    assert json.loads(seen["after"][1]) == {"error": "no session 's9'; call proof_open first"}
+    raised = json.loads(text)
+    assert not is_error and raised["ok"] is False and raised["error"] == "RuntimeError: kaboom"
+    assert json.loads(seen["after"][1])["error"] == "no session 's9'; call proof_open first"
     assert seen["bad_types"][0] and seen["missing"][0] and seen["unknown"][0], "the SDK refuses these itself"
-    assert json.loads(seen["still_alive"][1]) == {"error": "no session 's9'; call proof_open first"}
+    assert json.loads(seen["still_alive"][1])["error"] == "no session 's9'; call proof_open first"
 
 
 # ---------------------------------------------------------------------- live
@@ -331,7 +360,9 @@ class TestLive:
         # Speculative: no move, `loop_of` on a no-op names the *trace* step (the failed
         # step 1 counts in the trace, not in the session's history), no diagnosis on success.
         spec = server.proof_step(sid, "idtac.", mode="speculative")
-        assert spec == {"ok": True, "error": None, "loop_of": 2, "diagnosis": ""}
+        assert {k: spec[k] for k in ("ok", "error", "loop_of", "diagnosis")} == {
+            "ok": True, "error": None, "loop_of": 2, "diagnosis": ""}
+        assert "would succeed" in spec["what"] and spec["goal"] and "commits it" in spec["next"][0]
         assert server.proof_step(sid, "idtac.")["loop_of"] == 2
         assert server.proof_step(sid, "reflexivity.", mode="speculative")["diagnosis"]
 
@@ -373,11 +404,13 @@ class TestLive:
         assert "framed" in where and "step 2" in where
         blamed = server.proof_ledger(sid, "blame", hyp="HP")["answer"]
         assert "not available at step 3?" in blamed and "repair class: frame-later" in blamed
-        assert server.proof_ledger(sid, "leftovers") == {"answer": "the spatial context is empty", "count": 0}
-        assert server.proof_ledger(sid, "unused_at_qed") == {"answer": "every resource was consumed"}
+        left = server.proof_ledger(sid, "leftovers")
+        assert (left["ok"], left["what"], left["answer"], left["count"]) == (True, "the spatial context is empty",
+                                                                             "the spatial context is empty", 0)
+        assert server.proof_ledger(sid, "unused_at_qed")["answer"] == "every resource was consumed"
         events = server.proof_ledger(sid, "events")["answer"]
         assert 'step 1 · Intro · "HP"' in events and "GoalClosed" in events
-        assert server.proof_ledger(sid, "where_did_it_go") == {"error": "hyp is required"}
+        assert server.proof_ledger(sid, "where_did_it_go")["error"] == "hyp is required"
 
     def test_destruct_compiles_from_the_skeleton_and_applies(self, server: PcpServer) -> None:
         sid = _open(server, "Basic.v", "exists_pure")

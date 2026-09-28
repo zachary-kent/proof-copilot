@@ -341,3 +341,47 @@ def test_split_targets_include_the_pure_names_left_behind() -> None:
     assert consume.targets == ["HΦ", "n", "Hn"]
     trace = _TraceLike([Step(0, 1, "<start>", prev), Step(1, 2, tactic, nxt), Step(2, 3, 'iApply "H".', nxt, ok=False, error="H not found")])
     assert '"HΦ", "n", "Hn"' in blame(trace, 2, "H").advice
+
+
+# ------------------------------------------------------- fraction splits (issue 9)
+
+
+def _array_split() -> tuple[list[IrisGoal], list[IrisGoal], str]:
+    tactic = 'iDestruct "Hc" as "(Hc0 & Hc1 & Hc2 & _)".'
+    wp = "WP ! #c {{ v, Φ v }}"
+    prev = [goal("g0", wp, spatial=sp(("Hc", "c ↦∗ [#h1; #h2; et]")))]
+    next_ = [goal("g0", wp, spatial=sp(
+        ("Hc0", "c ↦∗{#1 / 2} [#h1; #h2; et]"),
+        ("Hc1", "c ↦∗{#1 / 4} [#h1; #h2; et]"),
+        ("Hc2", "c ↦∗{#1 / 8} [#h1; #h2; et]"),
+    ))]
+    return prev, next_, tactic
+
+
+def test_idestruct_on_an_array_that_halves_the_fraction_warns() -> None:
+    from pcp.state.ledger.diff import step_warnings
+
+    prev, next_, tactic = _array_split()
+    events = diff_step(prev, next_, step=4, tactic=tactic)
+    assert [e.hyp for e in kinds(events, "Split")] == ["Hc0", "Hc1", "Hc2"], "the ordinary events stay"
+    (fs,) = kinds(events, "FractionSplit")
+    assert fs.hyp == "Hc" and fs.sources == ["Hc"] and fs.targets == ["Hc0", "Hc1", "Hc2"]
+    (warning,) = step_warnings(events)
+    assert "split the fraction of `c ↦∗ [#h1; #h2; et]` into {#1/2}, {#1/4}, {#1/8}" in warning
+    assert "not the list" in warning and "array_cons" in warning
+    trace = _TraceLike(steps=[Step(3, 3, "x.", goals=prev), Step(4, 4, tactic, goals=next_)], events=events)
+    assert "fraction split" in blame(trace, 5, "Hc").advice
+
+
+def test_cell_halving_and_cons_splits_do_not_warn() -> None:
+    from pcp.state.ledger.diff import step_warnings
+
+    wp = "WP ! #l {{ v, Φ v }}"
+    prev = [goal("g0", wp, spatial=sp(("Hl", "l ↦ #1")))]
+    halves = [goal("g0", wp, spatial=sp(("Hl1", "l ↦{#1 / 2} #1"), ("Hl2", "l ↦{#1 / 2} #1")))]
+    events = diff_step(prev, halves, step=2, tactic='iDestruct "Hl" as "[Hl1 Hl2]".')
+    assert len(kinds(events, "FractionSplit")) == 1 and step_warnings(events) == []
+    arr = [goal("g0", wp, spatial=sp(("Hc", "c ↦∗ [#1; #2]")))]
+    cons = [goal("g0", wp, spatial=sp(("H0", "c ↦ #1"), ("Hc", "(c +ₗ 1) ↦∗ [#2]")))]
+    events = diff_step(arr, cons, step=2, tactic='iDestruct (array_cons with "Hc") as "[H0 Hc]".')
+    assert not kinds(events, "FractionSplit") and step_warnings(events) == []

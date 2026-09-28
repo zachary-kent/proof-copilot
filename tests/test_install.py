@@ -34,7 +34,7 @@ assert load_skills()[0].strip(), "empty prover skill"
 assert set(a.skill_names()) >= {"prover.md", "decomposer.md", "invariants.md", "logatom.md"}, a.skill_names()
 assert "iDump" in idump_source().read_text()
 assert a.toolchain_pins()["PCP_ROCQ_VERSION"]
-assert a.setup_script().is_file()
+assert a.setup_script().is_file() and a.sidecar_script().is_file()
 assert all(problem is None for _, problem in a.check_assets())
 print(pcp.__file__)
 print(idump_source())
@@ -46,6 +46,7 @@ def test_every_packaged_asset_is_reachable_through_the_loader() -> None:
     assert assets.skill_text("prover.md") == (PACKAGED / "skills" / "prover.md").read_text(encoding="utf-8")
     assert assets.idump_path() == PACKAGED / "coq" / "IDump.v"
     assert assets.setup_script() == PACKAGED / "setup-toolchain.sh"
+    assert assets.sidecar_script() == PACKAGED / "setup-sidecar.sh"
     assert all(problem is None for _, problem in assets.check_assets())
 
 
@@ -77,7 +78,8 @@ def test_pins_are_single_sourced_and_the_script_reads_them() -> None:
     script = assets.setup_script().read_text(encoding="utf-8")
     assert "toolchain.env" in script
     # No version literal is repeated in the script or the developer env.sh.
-    for text in (script, (ROOT / "env.sh").read_text(encoding="utf-8")):
+    sidecar = assets.sidecar_script().read_text(encoding="utf-8")
+    for text in (script, sidecar, (ROOT / "env.sh").read_text(encoding="utf-8")):
         assert not re.search(r"PCP_\w+_VERSION=\S", text), "a pin was duplicated outside toolchain.env"
 
 

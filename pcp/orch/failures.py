@@ -30,6 +30,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from pcp.rocq.errors import collapse_environment  # re-exported: the one binder-dump rule
+
 #: Detail prefix the gate uses when it could not run at all (missing/timed-out coqc).
 GATE_COULD_NOT_RUN = "gate could not run:"
 
@@ -130,11 +132,6 @@ _NOT_AN_ERROR = re.compile(
     r'^\s*(?:"""|/\*)|^\s*\d+[:\t]|\bin line:|PLAN\.md|def \w+\(|^\s*import \w+|^\s*Exit code \d+\s*$', _M
 )
 _PACKET_FILES = ("_CoqProject", "pcp-node.json", "TASK.md", "answer.json", "proof.v", ".mcp.json")
-_COMPLAINT = (
-    r"(?:The term\b|Unable to unify\b|Cannot \w|Illegal\b|The reference\b|Found no\b"
-    r"|Impossible to unify\b|In the projection\b|No such\b|The command has indeed failed\b)"
-)
-_ENVIRONMENT_DUMP = re.compile(r"In environment\b.*?(?=" + _COMPLAINT + ")", re.S)
 _DIAGNOSIS_FIELD = re.compile(r'["\']?diagnosis["\']?\s*:\s*"(?:[^"\\]|\\.)*"', re.S)
 _NO_ANSWER = re.compile(r"produced no answer\.json|wrote no answer\.json|produced no output|no answer", _I)
 
@@ -144,11 +141,6 @@ _NO_ANSWER = re.compile(r"produced no answer\.json|wrote no answer\.json|produce
 def strip_our_own_diagnosis(text: str) -> str:
     """Drop the diagnosis ``pcp check`` attached: the taxonomy reads the compiler, never us."""
     return _DIAGNOSIS_FIELD.sub("", text or "")
-
-
-def collapse_environment(text: str) -> str:
-    """Drop Rocq's ``In environment`` binder dump, keeping the complaint after it."""
-    return _ENVIRONMENT_DUMP.sub("In environment [...] ", text or "")
 
 
 _ESCAPE = re.compile(r'\\u([0-9a-fA-F]{4})|\\(["\\/nrt])')

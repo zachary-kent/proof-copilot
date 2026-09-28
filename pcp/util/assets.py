@@ -9,7 +9,9 @@ is therefore an error (:class:`MissingAsset`), never an empty default.
 * ``skills/*.md`` -- worker norms carried in every packet (docs/ARCHITECTURE.md 8);
 * ``coq/IDump.v`` -- the reflected dump (PLAN.md 3.1);
 * ``setup-toolchain.sh`` + ``toolchain.env`` -- ``pcp setup`` and the pins it installs,
-  which ``pcp doctor`` / ``pcp env`` read too, so the pins exist exactly once.
+  which ``pcp doctor`` / ``pcp env`` read too, so the pins exist exactly once;
+* ``setup-sidecar.sh`` -- ``pcp setup --for-project``: a petanque for a project's own
+  Rocq, in its own switch.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ PACKAGE = "pcp.assets"
 SKILLS_DIR = "skills"
 IDUMP = "coq/IDump.v"
 SETUP_SCRIPT = "setup-toolchain.sh"
+SIDECAR_SCRIPT = "setup-sidecar.sh"
 PINS = "toolchain.env"
 #: The skill every prover packet carries (``pcp prove``).
 PROVER_SKILL = "prover.md"
@@ -74,6 +77,10 @@ def setup_script() -> Path:
     return asset_path(SETUP_SCRIPT)
 
 
+def sidecar_script() -> Path:
+    return asset_path(SIDECAR_SCRIPT)
+
+
 def pins_path() -> Path:
     return asset_path(PINS)
 
@@ -95,7 +102,7 @@ def toolchain_pins() -> dict[str, str]:
 
 def check_assets() -> list[tuple[str, str | None]]:
     """``(asset, problem-or-None)`` for every required asset -- ``pcp doctor``'s view."""
-    required = [f"{SKILLS_DIR}/{PROVER_SKILL}", IDUMP, SETUP_SCRIPT, PINS]
+    required = [f"{SKILLS_DIR}/{PROVER_SKILL}", IDUMP, SETUP_SCRIPT, SIDECAR_SCRIPT, PINS]
     out: list[tuple[str, str | None]] = []
     for rel in required:
         try:

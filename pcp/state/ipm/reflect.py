@@ -71,20 +71,24 @@ def build_idump(root: Path) -> Path:
     root = Path(root)
     if not root.is_absolute():
         raise UsageError(f"build_idump needs an absolute root, got {root}")
-    coqc = penv.coqc_binary()
+    from pcp.config.toolchain import resolve
+
+    chain = resolve(root)
+    coqc = chain.coqc
     if coqc is None:
         raise ToolchainError("no coqc/rocq on PATH or in the pinned switch (run `pcp setup`); the reflected dump is unavailable")
     pkg = root / LOGICAL_ROOT
     pkg.mkdir(parents=True, exist_ok=True)
     source = read_text(idump_source())
-    banner = run([coqc, "--version"], timeout=60).stdout.strip()
+    banner = run([coqc, "--version"], timeout=60, env=chain.env()).stdout.strip()
     key = content_hash(source + "\n" + banner)
     vo, stamp = pkg / "IDump.vo", pkg / "IDump.stamp"
     with _build_lock(pkg):
         if vo.exists() and stamp.exists() and read_text(stamp).strip() == key:
             return vo
         atomic_write_text(pkg / "IDump.v", source)
-        done = run([coqc, "-R", str(pkg), LOGICAL_ROOT, "-w", "-notation-overridden", "IDump.v"], cwd=pkg, timeout=BUILD_TIMEOUT)
+        argv = [*chain.compiler_argv(), "-R", str(pkg), LOGICAL_ROOT, "-w", "-notation-overridden", "IDump.v"]
+        done = run(argv, cwd=pkg, timeout=BUILD_TIMEOUT, env=chain.env())
         if not done.ok or not vo.exists():
             raise ToolchainError(f"failed to build IDump.v: {done.spawn_error or done.output[-2000:]}")
         atomic_write_text(stamp, key + "\n")

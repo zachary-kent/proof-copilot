@@ -64,6 +64,10 @@ Edit the `[tiers]` in `.pcp/config.toml` to the models the user actually has.
 
 Run `/mcp` to see the server's status. Then:
 
+- **Just installed the plugin, tools not listed yet**: they appear after a restart. Until
+  then `pcp tools call TOOL '{…json args…}'` runs the same tools from Bash (a per-project
+  daemon keeps sessions between calls; `pcp tools stop` ends it).
+
 - **`pcp` not found by Claude Code** (it was started from a GUI or a harness whose PATH
   lacks `~/.local/bin`): either start Claude Code from a shell where `command -v pcp`
   works, or register the absolute path once:

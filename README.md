@@ -48,13 +48,18 @@ Codex (`codex`).
 ```bash
 # 1. pcp itself. Pick a tag from CHANGELOG.md; the [mcp] extra enables `pcp mcp` and --state-tools.
 #    --python 3.11: from a git URL uv does not pick an interpreter by requires-python (it fetches one if needed).
-uv tool install --python 3.11 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@v0.3.1'
+uv tool install --python 3.11 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@v0.4.0'
 
-# 2. The pinned toolchain in an opam switch named `pcp`: Rocq 9.1.1, coq-lsp 0.2.5, Iris 4.5.0, std++ 1.13.0.
+# 2. A toolchain. A project with its own opam switch (`_opam`) needs none of this:
+#    pcp uses that switch, see "Using a project's own Rocq/Iris" below.
+#    Otherwise, pcp's tested default in an opam switch named `pcp`:
+#    Rocq 9.1.1, coq-lsp 0.2.5, Iris 4.5.0, std++ 1.13.0.
 pcp setup --dry-run      # show the opam commands
 pcp setup                # idempotent; the first run takes a while
 
-# 3. Check the toolchain, its pins, the packaged files, the Python deps and which runners are reachable.
+# 3. Can pcp open a lemma here? Shows the toolchain in use and why, the versions it reads
+#    from that toolchain, and opens a real lemma through petanque. Also checks the packaged
+#    files, the Python deps and which runners are reachable.
 pcp doctor
 
 # 4. In your Rocq project, write .pcp/config.toml and git-ignore .pcp/.
@@ -64,10 +69,51 @@ cd ~/my-iris-project && pcp init
 pipx works as well and takes the same `'proof-copilot[mcp] @ git+…'` spec. To upgrade, run
 the install again with a newer tag and `--force`.
 
-**You don't need to activate anything.** pcp finds the switch by itself: it checks `PATH`
-first, then `$OPAMROOT/pcp/bin` (default `~/.opam/pcp/bin`). So pcp works when Claude Code or
-Codex starts it without a login shell. If you want `rocq`/`coqc` on your own shell's `PATH`,
-run `eval "$(pcp env)"`.
+**You don't need to activate anything.** pcp finds the toolchain by itself, per project (see
+below), falling back to `$OPAMROOT/pcp/bin` (default `~/.opam/pcp/bin`). So pcp works when
+Claude Code or Codex starts it without a login shell. If you want `rocq`/`coqc` on your own
+shell's `PATH`, run `eval "$(pcp env)"`; in a project with a local switch it exports that one.
+
+### Using a project's own Rocq/Iris
+
+pcp's pins are only the default it is tested with. A project on another Rocq or Iris (say
+Rocq 9.2 with Iris dev in a project-local switch) works as it is:
+
+- **Auto-detection.** pcp takes `coqc`/`rocq` from, in order: `PCP_COQC`; the nearest `_opam`
+  above the file or workspace (a project-local opam switch, as opam finds it); the switch
+  `PCP_OPAM_SWITCH` names, if it is not the default `pcp`; `PATH`; the pinned switch. The
+  project root is the nearest `_RocqProject`/`_CoqProject`, or a `dune-project` that uses
+  `rocq`/`coq`.
+- **Everything else follows the compiler.** Packages and versions are read from the same
+  switch. `pet` comes from that switch too, else from a *sidecar* (below), else from `PATH` or
+  the pinned switch only if it was built for the same Rocq. A `ROCQPATH`/`COQPATH` entry that
+  belongs to another switch (a leftover `pcp env`) is dropped, so two Iris builds never mix.
+- **Explicit overrides.** `PCP_COQC`, `PCP_PET`, `PCP_PET_SERVER` name binaries directly;
+  `PCP_OPAM_SWITCH=NAME` (or a directory holding `_opam`) picks a switch.
+- **No petanque for that Rocq?** Don't install coq-lsp into the project's switch: opam may
+  rebuild its Rocq, std++ and Iris, and every `.vo` the project built becomes "inconsistent
+  assumptions". Instead run
+
+  ```bash
+  pcp setup --for-project --dry-run   # in the project: the exact opam commands
+  pcp setup --for-project             # builds only pet, in a switch pcp-pet-rocq-<version>
+  ```
+
+  This creates a separate switch with the project's OCaml and exactly its Rocq, and
+  installs a coq-lsp release for that Rocq, or pins coq-lsp's `v<major>.<minor>` branch
+  there if none exists. No opam command names the project's switch. pcp then picks the
+  sidecar's `pet` up by itself and points it at the project's libraries (`ROCQLIB`,
+  `OCAMLPATH`).
+- **`pcp doctor`** (or `pcp doctor --project DIR`) shows which `coqc` is in use and why, its
+  switch, the Rocq, std++, Iris and coq-lsp versions *in that switch*, where `pet` comes from
+  and the Rocq it was built for, the library roots, and any `ROCQPATH` entries it ignores. It
+  judges versions against what pcp needs (`PCP_MIN_*` in `pcp/assets/toolchain.env`, such as
+  Rocq >= 9.0 and coq-lsp >= 0.2.5). A difference from the tested pins is shown but is not an
+  error. It then answers "can pcp open a lemma here?" by opening one: the first lemma of the
+  project's smallest built file, or the one you give with `--lemma FILE:NAME`. On failure it
+  prints petanque's error. `--no-probe` skips this step.
+- **Workers** (`pcp prove`, sandboxed or not) get the development's toolchain pinned
+  explicitly, because they run in a scratch directory that has no `_opam` above it.
 
 **pcp never implements login.** `pcp doctor` prints the command to run (`codex login`, or
 `/login` in Claude Code) and never asks for a credential.
@@ -222,13 +268,13 @@ pcp reads the config from the current directory, so run pcp from the project roo
 
 | variable | effect |
 |---|---|
-| `PCP_OPAM_SWITCH` | switch that `pcp setup` builds and pcp falls back to (default `pcp`) |
+| `PCP_OPAM_SWITCH` | switch that `pcp setup` builds; a non-default name is also used ahead of `PATH` (default `pcp`) |
 | `OPAMROOT` | opam root (default `~/.opam`) |
-| `PCP_COQC` | `coqc` to use (else `coqc`, then `rocq` on `PATH`, then the switch) |
-| `PCP_PET`, `PCP_PET_SERVER` | petanque binaries, stdio and socket (else `PATH`, then the switch) |
+| `PCP_COQC` | `coqc` to use (else the project's `_opam`, `PCP_OPAM_SWITCH`, `PATH`, the pinned switch) |
+| `PCP_PET`, `PCP_PET_SERVER` | petanque binaries, stdio and socket (else the compiler's switch, a sidecar, then `PATH`/the pinned switch when built for the same Rocq) |
 | `PCP_PET_MEM_LIMIT_MB` | hard memory limit for petanque (default 24576) |
 | `PCP_BWRAP` | bubblewrap binary for `--sandbox` (else `bwrap` on `PATH`) |
-| `ROCQPATH`, `COQPATH` | extra Rocq library roots, searched before the switch's `user-contrib` |
+| `ROCQPATH`, `COQPATH` | extra Rocq library roots, searched before the switch's `user-contrib` (another switch's entries are ignored) |
 | `ANTHROPIC_API_KEY` | enables `--runner direct` (needs the `[api]` extra) |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | raised to 128000 for Claude workers unless you set it |
 
@@ -239,9 +285,12 @@ pcp sets `PCP_SANDBOX=1` inside a sandbox itself; don't set it by hand.
 - **`pcp doctor` shows `coqc` or `pet` missing.** Run `pcp setup`. If you build the switch
   under another name or opam root, set `PCP_OPAM_SWITCH` / `OPAMROOT` for every pcp process
   (or run `pcp setup --switch NAME` and export the variable).
-- **`pcp doctor` shows a version that does not match its pin.** A different `coqc` is earlier
-  on your `PATH`, and a binary on `PATH` always wins. Remove it from `PATH` or point `PCP_COQC`
-  at the switch's `coqc`.
+- **`pcp doctor` shows a version that differs from the tested default.** That's fine as long as
+  the version meets what pcp needs and the "can pcp open a lemma here?" check says yes. The
+  "chosen because" line says where the `coqc` came from. A binary on `PATH` wins over the
+  pinned switch, so point `PCP_COQC` elsewhere if that is the wrong one.
+- **`petanque was built for Rocq X but coqc is Rocq Y`, or `no petanque for this Rocq`.** Run
+  `pcp setup --for-project` in the project (see "Using a project's own Rocq/Iris").
 - **`no runner is available`.** Install `claude` or `codex` and log in. `pcp doctor` lists
   which runners it can reach.
 - **`import pytanque` fails, or pytanque behaves strangely.** pcp depends on LLM4Rocq's

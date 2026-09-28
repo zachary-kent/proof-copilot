@@ -173,3 +173,34 @@ def parse_tactic(sentence: str) -> TacticCall:
                 tokens.append(Token("punct", ch, i))
             i += 1
     return TacticCall(text=code, head=head, tokens=tuple(tokens))
+
+
+def term_head(term: str) -> str:
+    """The constant a term applies: ``lem`` in ``(lem x with "H")``, ``f`` in ``x.(f) y``.
+
+    The diagnosis names the lemma behind ``iMod (lem with "…")``; a bare "first
+    identifier" read ``hazptr.(hazard_domain_register) (node vs)`` as the lemma
+    ``hazptr``, which is only the record the field is projected from.  ``((f x) with
+    "H")`` and ``@lem`` are unwrapped the same way.
+    """
+    code = strip_comments(term).strip()
+    for _ in range(16):  # bounded unwrapping; real terms nest a handful deep
+        code = code.lstrip("@").lstrip()
+        if not code:
+            return ""
+        if code[0] in _OPEN:
+            end = _matching(code, 0)
+            inner = code[1 : end - 1].strip()
+            code = inner
+            continue
+        j = 0
+        while j < len(code) and (code[j].isalnum() or code[j] in "_'."):
+            j += 1
+        word = code[:j]
+        if word.endswith(".") and j < len(code) and code[j] == "(":
+            # `r.(field)`: the projected field is what is applied.
+            end = _matching(code, j)
+            code = code[j + 1 : end - 1]
+            continue
+        return word.rstrip(".")
+    return ""

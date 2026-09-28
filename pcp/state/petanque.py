@@ -40,7 +40,9 @@ from pathlib import Path
 from typing import Any
 
 from pcp.config import env as penv
+from pcp.config.toolchain import resolve as resolve_toolchain
 from pcp.errors import StateError, ToolchainError
+from pcp.rocq.errors import shape_error
 from pcp.rocq.lexer import first_word, split_sentences
 from pcp.util.io import atomic_write_text
 from pcp.util.proc import kill_tree
@@ -54,6 +56,25 @@ DEFAULT_RSS_CAP_MB = 8192
 TIMEOUT_GRACE_S = 15.0
 #: Wire code petanque uses for a Rocq-level error (``Coq: ...``).
 _COQ_ERROR_CODE = -32003
+
+
+class StartFailed(StateError):
+    """``petanque/start`` could not open the lemma: a Rocq error or its wall clock.
+
+    Distinct from a dead process so a caller that knows the *source* file (the
+    tracer; petanque may have been given the statements-only twin) can look for the
+    document's first error before the lemma and name it (``pcp.rocq.errors``).
+    """
+
+    def __init__(self, message: str, *, thm: str, file: str, detail: str, timed_out: bool = False,
+                 budget_s: float = 0.0) -> None:
+        super().__init__(message)
+        self.thm = thm
+        self.file = file
+        #: petanque's own words, shaped (``shape_error``).
+        self.detail = detail
+        self.timed_out = timed_out
+        self.budget_s = budget_s
 
 
 class TacticError(Exception):
@@ -229,7 +250,11 @@ class PetProcess:
         self.start_timeout = start_timeout
         self.step_timeout = step_timeout
         self.call_timeout = call_timeout
-        self.mode = mode or ("socket" if penv.pet_server_binary() else "stdio")
+        #: The toolchain of the workspace's project: its ``pet`` and an environment in
+        #: which that pet loads that project's libraries, never another switch's.
+        self.toolchain = resolve_toolchain(self.workspace, environ=self.env)
+        self.env = self.toolchain.env(self.env)
+        self.mode = mode or ("socket" if self.toolchain.pet_server else "stdio")
         self.generation = 0
         self.lock = threading.RLock()
         self.files: set[str] = set()
@@ -260,9 +285,9 @@ class PetProcess:
 
     def _spawn_stdio(self) -> None:
         pytanque = _pytanque()
-        binary = penv.pet_binary()
+        binary = self.toolchain.pet
         if binary is None:
-            raise ToolchainError("no `pet` binary on PATH or in the pinned switch (run `pcp setup`; see `pcp doctor`)")
+            raise ToolchainError(f"no `pet` for {self.toolchain.describe()}: {'; '.join(self.toolchain.problems())} (see `pcp doctor`)")
         wrapper = pet_wrapper(binary, self.mem_limit_mb)
         self._proc = subprocess.Popen(
             [str(wrapper)],
@@ -280,7 +305,7 @@ class PetProcess:
 
     def _spawn_socket(self) -> None:
         pytanque = _pytanque()
-        binary = penv.pet_server_binary()
+        binary = self.toolchain.pet_server
         if binary is None:
             raise ToolchainError("no `pet-server` binary on PATH")
         wrapper = pet_wrapper(binary, self.mem_limit_mb)
@@ -472,11 +497,13 @@ class PetProcess:
         if not self.alive():
             if self._dead_reason == "closed":
                 return StateError(f"petanque process #{self.id} was closed during `{fn}`; call proof_open again")
-            self._dead_reason = self._dead_reason or f"died during `{fn}`: {text[:200]}"
+            self._dead_reason = self._dead_reason or f"died during `{fn}`: {shape_error(text, 200)}"
             tail = self.stderr_tail()[-1000:]
             suffix = f"\n{tail}" if tail else ""
-            return StateError(f"petanque process #{self.id} died during `{fn}`: {text[:300]}{suffix} -- call proof_open again")
-        return StateError(f"petanque `{fn}` failed: {text[:500]}")
+            return StateError(
+                f"petanque process #{self.id} died during `{fn}`: {shape_error(text, 300)}{suffix} -- call proof_open again"
+            )
+        return StateError(f"petanque `{fn}` failed: {shape_error(text)}")
 
     # -- typed calls -----------------------------------------------------------
     def _handle(self, raw: Any, *, state_hash: int | None) -> StateHandle:
@@ -493,14 +520,33 @@ class PetProcess:
     def start(
         self, file: str | Path, thm: str, pre_commands: str | None = None, *, timeout: float | None = None
     ) -> StateHandle:
-        """``petanque/start``: elaborate the file prefix and open ``thm``."""
+        """``petanque/start``: elaborate the file prefix and open ``thm``.
+
+        A Rocq-level failure or an overrun of the wall clock raises :class:`StartFailed`;
+        after an overrun the process is dead (the watchdog killed it) and the pool
+        restarts it before its next call, so one wedged document never wedges the pool.
+        """
         path = str(Path(file).resolve())
         with self.lock:
             budget = self.start_timeout if timeout is None else timeout
             try:
                 raw = self.call("start", path, thm, pre_commands, timeout=budget)
             except TacticError as exc:  # start has no tactic: a Rocq error here is an open failure
-                raise StateError(f"petanque could not open {thm} in {path}: {exc.message}") from None
+                detail = shape_error(exc.message)
+                raise StartFailed(f"petanque could not open {thm} in {path}: {detail}", thm=thm, file=path,
+                                  detail=detail) from None
+            except StateError as exc:
+                if self._watchdog_fired:
+                    raise StartFailed(
+                        f"the document does not check up to {thm} within {budget:g} s ({path}; "
+                        "petanque was killed and restarts on the next call)",
+                        thm=thm, file=path, detail=str(exc), timed_out=True, budget_s=budget,
+                    ) from None
+                if not self.alive():
+                    raise
+                detail = str(exc).removeprefix("petanque `start` failed: ")
+                raise StartFailed(f"petanque could not open {thm} in {path}: {detail}", thm=thm, file=path,
+                                  detail=detail) from None
             self.files.add(path)
             h = self.call("state_hash", raw, timeout=self.call_timeout)
             return self._handle(raw, state_hash=int(h))

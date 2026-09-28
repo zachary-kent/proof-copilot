@@ -57,12 +57,20 @@ pcp/
   assets/
     skills/*.md        worker norms: prover, decomposer, invariants, logatom
     coq/IDump.v        the Ltac2 reflected IPM dump
-    setup-toolchain.sh `pcp setup`'s opam script
-    toolchain.env      the version pins -- the single source (env.sh, doctor, env, setup)
+    setup-toolchain.sh `pcp setup`'s opam script (the pinned switch)
+    setup-sidecar.sh   `pcp setup --for-project`: only petanque, for a project's Rocq, in a
+                       sidecar switch; never given (or able to select) the project's switch
+    toolchain.env      the tested pins and the PCP_MIN_* floors pcp needs -- the single
+                       source (env.sh, doctor, env, setup)
   config/
     env.py             every environment variable name in one place + lookups
-                       (coqc_binary, pet_binary, pet_server_binary, bwrap_binary, library_roots);
-                       the pinned-switch fallback (opam_root, switch_prefix, with_switch_path)
+                       (coqc_binary, pet_binary, pet_server_binary, bwrap_binary, library_roots,
+                       all delegating to toolchain.resolve); the pinned-switch fallback
+                       (opam_root, switch_prefix, with_switch_path); with_runner_defaults(toolchain=)
+    toolchain.py       resolve(start) -> Toolchain: coqc, its prefix and Rocq version, the pet
+                       built for it (same switch / sidecar / PATH), env() / worker_env() /
+                       exports() / prefixes() / problems(); project_root (_RocqProject,
+                       _CoqProject, dune-project using rocq/coq); version floors
     flags.py           DEFAULT_FLAGS (all off)
     schema.py          Config dataclass (tiers, providers, effort, flags, concurrency,
                        axiom_whitelist) + validation
@@ -337,13 +345,25 @@ loads every asset from it; `make install-check`).
 - **Toolchain.** `pcp setup` runs the packaged `setup-toolchain.sh`, which sources
   `toolchain.env`; `pcp doctor` and `pcp env` parse the same file, and `env.sh` reads it too.
   Bumping a pin is one edit there.
-- **Finding the switch.** Every binary lookup in `pcp.config.env` tries the explicit variable
-  (`PCP_COQC`, `PCP_PET`, ...), then `PATH`, then `$OPAMROOT/$PCP_OPAM_SWITCH/bin` (defaults
-  `~/.opam`, `pcp`). Library roots are `ROCQPATH`/`COQPATH` entries, then the switch's
-  `user-contrib`. Worker environments get the switch's `bin` *appended* to `PATH`. So pcp
-  launched by Claude Code or Codex, with no login shell, finds the toolchain; `eval "$(pcp env)"`
-  is only for a human shell that wants `rocq` on `PATH`. A binary on `PATH` always wins, and
-  `pcp doctor` reports when it does not match the pins.
+- **Finding the toolchain.** `pcp.config.toolchain.resolve(start)` picks the compiler first
+  and derives the rest from where it lives, so `coqc`, petanque and the libraries always
+  agree. The compiler comes from `PCP_COQC`; else the nearest `_opam` above `start`; else a
+  non-default `PCP_OPAM_SWITCH`; else `PATH`; else `$OPAMROOT/pcp`. Versions are read from
+  that prefix's `.opam-switch/packages`. `pet` comes from `PCP_PET`; else the same prefix;
+  else the sidecar `pcp-pet-rocq-<version>`; else `PATH` or the pinned switch, only when
+  built for the same Rocq. Every Rocq child is spawned with `Toolchain.env()`: foreign
+  `ROCQPATH`/`COQPATH` entries are dropped, the compiler's `bin` is put first on `PATH`, and a
+  sidecar pet gets `ROCQLIB`/`OCAMLPATH` pointing at the project's `Corelib` and plugins.
+  `PetProcess` resolves from the environment it is given. So pcp launched by Claude Code or
+  Codex, with no login shell, finds the toolchain; `eval "$(pcp env)"` is only for a human
+  shell. The pins are pcp's tested default. `pcp doctor` judges against the `PCP_MIN_*`
+  floors and against a live probe that opens a lemma through petanque.
+- **Workers.** A worker's cwd is a scratch packet with no `_opam` above it, so
+  `pcp.cli.runners` resolves the toolchain for the development once (`toolchain_for`) and
+  pins it: `Toolchain.worker_env()` (= `env()` plus `PCP_COQC`/`PCP_PET`/`PCP_PET_SERVER`)
+  becomes an unsandboxed runner's env and a `Sandbox`'s (`with_runner_defaults(toolchain=)`).
+  The sandbox binds every `Toolchain.prefixes()` entry read-only as a carve-back, so a
+  prefix under a masked subtree stays reachable, and also at its symlink's path.
 - **Sandbox binds.** `--sandbox` replaces `$HOME` with a tmpfs, so a `uv tool` install under
   `~/.local/share/uv` would vanish inside it. `Sandbox.for_benchmark` therefore binds pcp's own
   installation read-only (`install_paths()`: `sys.prefix`, `sys.base_prefix`, the package

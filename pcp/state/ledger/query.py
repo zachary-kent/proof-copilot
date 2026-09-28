@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from pcp.state.ipm.model import Hyp, IrisGoal, Step
-from pcp.state.ledger.events import CONSUME_KINDS, PRODUCE_KINDS, Event, past_tense
+from pcp.state.ledger.events import CONSUME_KINDS, EFFECT_KINDS, PRODUCE_KINDS, Event, past_tense
 
 Fate = Literal["live", "consumed", "framed", "persisted", "renamed", "split", "never-seen", "unknown"]
 RepairClass = Literal["split-differently", "frame-later", "duplicate-it-is-persistent", "restate", "unknown"]
@@ -193,7 +193,9 @@ def where_did_it_go(trace: TraceLike, hyp: str, *, at_step: int | None = None) -
 
     ``at_step`` restricts the question to the state a step ran from (used by ``blame``).
     """
-    events = [e for e in _events(trace) if at_step is None or e.step < at_step]
+    # Tactic effects are annotations about the goal: no fate is read off them (a
+    # `Rewrite` of "H" is not where "H" went, and its own `unknown` is not the chain's).
+    events = [e for e in _events(trace) if (at_step is None or e.step < at_step) and e.kind not in EFFECT_KINDS]
     family = aliases(events, hyp)
     mine = [e for e in events if e.hyp in family or family & set(e.sources)]
     prov = Provenance(hyp=hyp, fate="never-seen", aliases=sorted(family - {hyp}))
@@ -342,6 +344,10 @@ def blame(trace: TraceLike, failing_step: int, needed_hyp: str) -> Blame:
             f"step {culprit.step} split it into " + ", ".join(f'"{t}"' for t in culprit.targets)
             + " -- destructure differently, or re-assemble the pieces."
         )
+        fraction = next((e for e in _events(trace) if e.kind == "FractionSplit" and e.step == culprit.step
+                         and family & set(e.sources)), None)
+        if fraction is not None:
+            advice += f" That split was a fraction split: {fraction.detail.removeprefix('warning: ')}"
     elif culprit.kind == "Frame":
         repair = "frame-later"
         advice = f"step {culprit.step} framed it into the goal -- frame later, or split the goal first."

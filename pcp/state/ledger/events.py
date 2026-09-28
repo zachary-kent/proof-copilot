@@ -33,16 +33,30 @@ EventKind = Literal[
     "LaterIntro",
     "GoalSplit",
     "GoalClosed",
+    "FractionSplit",
+    "GoalsCreated",
+    "Focus",
+    "Rewrite",
+    "FrameClosed",
+    "Witness",
+    "EvarInstantiated",
+    "WpStop",
     "Unknown",
 ]
 KINDS: tuple[str, ...] = (
     "Intro", "Consume", "Produce", "Split", "Rename", "Update", "Instantiate", "Frame", "Persist",
-    "Specialize", "ModIntro", "MaskChange", "LaterIntro", "GoalSplit", "GoalClosed", "Unknown",
+    "Specialize", "ModIntro", "MaskChange", "LaterIntro", "GoalSplit", "GoalClosed", "FractionSplit",
+    "GoalsCreated", "Focus", "Rewrite", "FrameClosed", "Witness", "EvarInstantiated", "WpStop", "Unknown",
 )
 #: Events whose ``hyp`` is a *new* name (they carry ``targets``).
 PRODUCE_KINDS: frozenset[str] = frozenset({"Intro", "Produce", "Split", "Specialize", "Persist", "Rename"})
 #: Events whose ``hyp`` is a name that *went away* (they carry ``sources``).
 CONSUME_KINDS: frozenset[str] = frozenset({"Consume", "Frame"})
+#: Tactic-effect events (``effects.py``): what a step did to the goal.  Annotations, like
+#: ``FractionSplit``: the resource queries never read a fate off them.
+EFFECT_KINDS: frozenset[str] = frozenset(
+    {"GoalsCreated", "Focus", "Rewrite", "FrameClosed", "Witness", "EvarInstantiated", "WpStop"}
+)
 
 #: Confidence is part of the record, not an afterthought (PLAN.md 4.4).
 Confidence = Literal["certain", "unknown"]
@@ -52,7 +66,9 @@ _PAST: dict[str, str] = {
     "Rename": "renamed", "Update": "updated", "Instantiate": "instantiated", "Frame": "framed",
     "Persist": "made persistent", "Specialize": "specialized", "ModIntro": "modality-introduced",
     "MaskChange": "mask-changed", "LaterIntro": "later-stripped", "GoalSplit": "goal-split",
-    "GoalClosed": "goal-closed", "Unknown": "lost track of",
+    "GoalClosed": "goal-closed", "FractionSplit": "fraction-split", "GoalsCreated": "created goals",
+    "Focus": "refocused", "Rewrite": "rewrote", "FrameClosed": "framed", "Witness": "instantiated",
+    "EvarInstantiated": "instantiated", "WpStop": "stopped", "Unknown": "lost track of",
 }
 
 
@@ -63,6 +79,10 @@ def past_tense(kind: str) -> str:
 
 @dataclass
 class Event:
+    """One ledger record.  ``FractionSplit`` is an annotation beside the step's ``Split``
+    (neither consume- nor produce-side): its ``detail`` is a warning worth surfacing.
+    The ``EFFECT_KINDS`` are annotations too, with ``klass="effect"``."""
+
     step: int
     kind: EventKind
     tactic: str
@@ -76,9 +96,11 @@ class Event:
     detail: str = ""
     confidence: Confidence = "certain"
     klass: str = "spatial"
+    #: Structured payload of an effect event (``effects.py``); omitted from JSON when empty.
+    data: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "step": self.step,
             "kind": self.kind,
             "tactic": self.tactic,
@@ -90,6 +112,9 @@ class Event:
             "confidence": self.confidence,
             "klass": self.klass,
         }
+        if self.data:
+            d["data"] = dict(self.data)
+        return d
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> Event:
@@ -104,6 +129,7 @@ class Event:
             detail=d.get("detail", ""),
             confidence=d.get("confidence", "certain"),
             klass=d.get("klass", "spatial"),
+            data=dict(d.get("data") or {}),
         )
 
     def mentions(self, name: str) -> bool:

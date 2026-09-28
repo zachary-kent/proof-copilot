@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import contextlib
 import math
+import threading
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -22,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pcp.errors import StateError
-from pcp.rocq.assemble import stubbed_twin
+from pcp.rocq.assemble import remove_twin, stubbed_twin
 from pcp.rocq.lexer import first_word, split_sentences
 from pcp.state.petanque import DEFAULT_STEP_TIMEOUT, GoalView, PetProcess, StateHandle, TacticError
 
@@ -32,6 +34,26 @@ if TYPE_CHECKING:
 #: Budget for the ``Set Typeclasses Debug`` re-run after a timeout (PLAN.md 6).
 TYPECLASS_DEBUG_TIMEOUT = 10.0
 TYPECLASS_DEBUG_CHARS = 8000
+
+#: Live sessions per statements-only twin, across every pool in this process (the MCP
+#: server's plain and reflect pools may share one): the last to close removes it.
+_twin_users: dict[str, int] = {}
+_twin_lock = threading.Lock()
+
+
+def _acquire_twin(twin: str) -> None:
+    with _twin_lock:
+        _twin_users[twin] = _twin_users.get(twin, 0) + 1
+
+
+def _release_twin(twin: str) -> None:
+    with _twin_lock:
+        left = _twin_users.get(twin, 1) - 1
+        if left > 0:
+            _twin_users[twin] = left
+            return
+        _twin_users.pop(twin, None)
+        remove_twin(twin)
 
 
 @dataclass
@@ -79,7 +101,12 @@ class ProofSession:
         #: The file petanque sees: the statements-only twin when ``stub_prefix``.
         #: Sound because ``Qed`` proofs are opaque: the state at ``thm`` depends on
         #: the *statements* before it, never on their bodies (tested).
-        self.file = str(stubbed_twin(self.source_file, keep=thm)) if stub_prefix else self.source_file
+        self.file = str(stubbed_twin(self.source_file, target=thm)) if stub_prefix else self.source_file
+        #: Releases this session's hold on the twin: at ``close``, or when collected.
+        self._twin_hold: weakref.finalize | None = None
+        if stub_prefix:
+            _acquire_twin(self.file)
+            self._twin_hold = weakref.finalize(self, _release_twin, self.file)
         self.thm = thm
         self.pre_commands = pre_commands
         self.step_timeout = step_timeout
@@ -101,6 +128,12 @@ class ProofSession:
     def mark_lost(self, reason: str) -> None:
         self.lost = True
         self.lost_reason = reason
+
+    def close(self) -> None:
+        """Let go of the twin (removed once no live session uses it).  Idempotent; the
+        pet-side state is the process's and goes with it."""
+        if self._twin_hold is not None:
+            self._twin_hold()
 
     @property
     def started(self) -> bool:
@@ -130,6 +163,9 @@ class ProofSession:
     def start(self) -> StateHandle:
         """``petanque/start`` on the pinned process; seeds loop detection with the root."""
         with self._held() as proc:
+            if self.stub_prefix and not Path(self.file).exists():
+                # Another process's session on the same file closed and removed it.
+                stubbed_twin(self.source_file, target=self.thm)
             self.root = proc.start(self.file, self.thm, self.pre_commands)
             self.current = self.root
             self.history = []
@@ -139,6 +175,27 @@ class ProofSession:
             if self.root.state_hash is not None:
                 self._seen[self.root.state_hash] = 0
             return self.root
+
+    def resume(self, root: StateHandle, history: list[tuple[str, StateHandle]]) -> None:
+        """Adopt a root and committed states another session reached, instead of ``start`` and re-running.
+
+        Incremental replay (``pcp.state.trace.ReplayCache``): petanque states are
+        immutable, so a state reached by an earlier trace of the same lemma is as good
+        as re-running its prefix -- provided it lives in *this* session's process and
+        generation, which is checked here, before the session holds anything stale.
+        """
+        with self._held() as proc:
+            for state in (root, *(s for _, s in history)):
+                proc.check_handle(state)
+            self.root = root
+            self.current = history[-1][1] if history else root
+            self.history = list(history)
+            self._lru.clear()
+            self._seen = {}
+            for i, state in enumerate((root, *(s for _, s in history))):
+                self._remember(state)
+                if state.state_hash is not None:
+                    self._seen.setdefault(state.state_hash, i)
 
     def _remember(self, state: StateHandle) -> None:
         self._lru[state.st] = state

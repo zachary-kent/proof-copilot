@@ -46,6 +46,8 @@ class SessionPool:
         self._lock = threading.Lock()
         self._processes: list[PetProcess] = []
         self._sessions: dict[int, list[weakref.ReferenceType[ProofSession]]] = {}
+        #: Every session opened here, so ``close`` releases their twins.
+        self._opened: weakref.WeakSet[ProofSession] = weakref.WeakSet()
         self._closed = False
 
     # -- processes -------------------------------------------------------------
@@ -112,11 +114,19 @@ class SessionPool:
                 return False
             reason = process.dead_reason or f"RSS {process.rss_mb()} MB exceeded the {process.rss_cap_mb} MB cap"
             process.restart(reason)
+            # A session that has not started holds no state ids, so it cannot go
+            # stale: it is the open that triggered this restart (after a killed
+            # `start`, the next open lands on the dead process) and stays registered.
+            keep = []
             for ref in self._sessions.get(process.id, []):
                 session = ref()
-                if session is not None:
+                if session is None:
+                    continue
+                if session.started:
                     session.mark_lost(f"petanque restarted ({reason})")
-            self._sessions[process.id] = []
+                else:
+                    keep.append(ref)
+            self._sessions[process.id] = keep
             return True
 
     # -- sessions --------------------------------------------------------------
@@ -135,6 +145,8 @@ class SessionPool:
 
         ``stub_prefix`` opens the statements-only twin (``pcp.rocq.assemble.stubbed_twin``),
         so affinity is computed on the twin's path -- that is the file petanque sees.
+        The twin is removed when the last session using it closes (``ProofSession.close``
+        or this pool's ``close``).
         ``start`` runs ``petanque/start`` immediately.
         """
         session = ProofSession(
@@ -147,7 +159,12 @@ class SessionPool:
             lru_size=lru_size,
             stub_prefix=stub_prefix,
         )
-        process = self.process_for(session.file)
+        try:
+            process = self.process_for(session.file)
+        except BaseException:
+            session.close()
+            raise
+        self._opened.add(session)
         session.bind(process)
         self.register(session)
         if start:
@@ -165,12 +182,17 @@ class SessionPool:
 
     # -- lifecycle -------------------------------------------------------------
     def close(self) -> None:
-        """Stop every process.  Idempotent; safe from ``atexit``."""
+        """Stop every process and close every session (removing their twins).
+        Idempotent; safe from ``atexit``."""
         with self._lock:
             if self._closed:
                 return
             self._closed = True
             procs, self._processes = self._processes, []
+            opened = list(self._opened)
+        for session in opened:
+            with contextlib.suppress(Exception):
+                session.close()
         for proc in procs:
             with contextlib.suppress(Exception):
                 proc.close()

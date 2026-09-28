@@ -44,7 +44,7 @@ from pcp.rocq.assumptions import classify_assumptions, parse_assumptions, traile
 from pcp.rocq.body import Violation, validate_body
 from pcp.rocq.decls import ProofBlock, parse_blocks
 from pcp.rocq.lexer import first_word, identifiers, split_sentences
-from pcp.rocq.project import compile_text, coq_project_flags
+from pcp.rocq.project import compile_text, development_flags
 from pcp.rocq.statement import normalize_statement, remove_binder, statement_binders
 from pcp.util.text import tail_lines
 
@@ -294,7 +294,7 @@ class Gate:
 
     @property
     def flags(self) -> list[str]:
-        return coq_project_flags(self.dev.root)
+        return development_flags(self.dev.path)
 
     @staticmethod
     def static_checks(bodies: dict[str, str]) -> list[Check]:

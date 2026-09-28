@@ -31,6 +31,20 @@ DEFAULT_COQ_ROOT = Path(".pcp/coq")
 # ---------------------------------------------------------------------- trace
 
 
+def trace_workspace(file: Path, override: Path | None = None) -> Path:
+    """The petanque workspace for tracing ``file``: ``override``, else the project root.
+
+    The project root is the nearest ``_RocqProject``/``_CoqProject`` directory, where
+    coq-lsp reads the load-path flags; ``file.parent`` lost a root ``-Q theories foo``
+    for every file below ``theories/`` and every ``Require`` of the project failed.
+    """
+    if override is not None:
+        return override
+    from pcp.config.toolchain import project_root
+
+    return project_root(file) or file.parent
+
+
 def script_tactics(text: str) -> list[str]:
     """A script file as tactic sentences, by the lexer -- not by physical line.
 
@@ -56,7 +70,9 @@ class TraceRun:
     reflector: Reflector | None = None
 
     @classmethod
-    def open(cls, file: Path, lemma: str, *, reflect: bool = False, coq_root: Path | None = None) -> TraceRun:
+    def open(
+        cls, file: Path, lemma: str, *, reflect: bool = False, coq_root: Path | None = None, workspace: Path | None = None,
+    ) -> TraceRun:
         """``reflect`` builds ``IDump`` under ``coq_root`` and spawns the pool with it on the load path.
 
         The env is passed to the pool, never written into ``os.environ``, and keeps every
@@ -76,7 +92,7 @@ class TraceRun:
             build_idump(root)
             env = env_with_idump(dict(os.environ), root)
             pre = REQUIRE
-        pool = SessionPool(file.parent, size=1, env=env)
+        pool = SessionPool(trace_workspace(file, workspace), size=1, env=env)
         try:
             session = pool.open(file, lemma, pre_commands=pre)
             reflector = Reflector(session) if reflect else None
@@ -109,32 +125,38 @@ def cmd_trace(args: argparse.Namespace) -> int:
     if not file.is_file():
         raise UsageError(f"{args.file}: no such file")
     lemma: str = args.lemma
+    places = None
     if args.script:
         script = absolute(args.script)
         assert script is not None
         tactics = script_tactics(read_text(script))
     else:
-        from pcp.rocq.decls import find_block
+        from pcp.state.trace import proof_script
 
-        block = find_block(read_text(file), lemma)
-        if block is None or not block.has_proof:
+        found = proof_script(read_text(file), lemma)
+        if found is None:
             raise UsageError(f"{args.file}: {lemma} has no proof to trace; pass --script")
-        tactics = block.tactics()
+        # Each sentence keeps its place in the file, so a failure names its line.
+        tactics, places = found
     out = absolute(args.out) if args.out else absolute(DEFAULT_TRACE_DIR / f"{file.stem}.{lemma}.jsonl")
     assert out is not None
 
-    run = TraceRun.open(file, lemma, reflect=bool(args.reflect))
+    workspace = absolute(args.workspace) if getattr(args, "workspace", None) else None
+    if workspace is not None and not workspace.is_dir():
+        raise UsageError(f"--workspace {args.workspace}: no such directory")
+    run = TraceRun.open(file, lemma, reflect=bool(args.reflect), workspace=workspace)
     try:
         run.tracer.start()
-        trace = run.tracer.run_script(tactics)
+        trace = run.tracer.run_script(tactics, locations=places)
         if args.oracle:
             run.annotate()
         trace.to_jsonl(out)
     finally:
         run.close()
-    print(f"{len(trace.steps)} steps, {len(trace.events)} ledger events → {out}")
+    final = trace.final.step if trace.final is not None else 0
+    print(f"{final} steps, {len(trace.events)} ledger events → {out}")
     if trace.error:
-        note(f"stopped at step {trace.failed_at}: {trace.error}")
+        note(trace.failure_note() or f"stopped: {trace.error}")
     return 0
 
 

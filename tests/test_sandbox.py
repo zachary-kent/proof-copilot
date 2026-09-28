@@ -689,3 +689,53 @@ def test_the_sandbox_root_is_the_enclosing_checkout_then_the_nearest_pcp_project
     assert sandbox_root((proj / "theories" / "x").resolve()) == proj.resolve()
     (tmp_path / "bare" / "d").mkdir(parents=True)
     assert sandbox_root((tmp_path / "bare" / "d").resolve()) == (tmp_path / "bare" / "d").resolve()
+
+
+# ---------------------------------------------------------------- the development's toolchain
+
+
+def _fake_prefix(prefix: Path, rocq: str, binaries: tuple[str, ...]) -> Path:
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "lib" / "coq" / "user-contrib").mkdir(parents=True)
+    (prefix / ".opam-switch" / "packages" / f"rocq-core.{rocq}").mkdir(parents=True)
+    for b in binaries:
+        (prefix / "bin" / b).write_text("#!/bin/sh\n")
+        (prefix / "bin" / b).chmod(0o755)
+    return prefix
+
+
+def test_the_developments_toolchain_is_bound_and_pinned_even_under_a_mask(tmp_path: Path, monkeypatch) -> None:
+    """A worker's cwd is a scratch packet: it cannot re-discover the project's ``_opam``,
+    so the sandbox pins the toolchain resolved for the development, binds every prefix
+    it reads (the sidecar lives in the opam root, the project switch in the repo) and
+    keeps a prefix reachable when it sits below a masked subtree."""
+    from pcp.config import toolchain as tc
+
+    monkeypatch.setenv("PCP_BWRAP", "/fake/bwrap")
+    for var in ("PCP_COQC", "PCP_PET", "PCP_PET_SERVER", "PCP_OPAM_SWITCH", "ROCQPATH", "COQPATH"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("OPAMROOT", str(tmp_path / "opam"))
+    repo = tmp_path / "repo"
+    (repo / ".pcp").mkdir(parents=True)
+    (repo / "_CoqProject").write_text("-Q theories p\n")
+    # The project's switch is a symlink under the masked `.pcp` (the worst case), its
+    # pet a sidecar in the opam root.
+    real = _fake_prefix(tmp_path / "switches" / "proj", "9.2.0", ("coqc",))
+    (repo / ".pcp" / "_opam").symlink_to(real)
+    side = _fake_prefix(tmp_path / "opam" / "pcp-pet-rocq-9.2.0", "9.2.0", ("pet",))
+    chain = tc.resolve(repo / ".pcp" / "x.v")
+    assert chain.prefix == repo / ".pcp" / "_opam" and chain.sidecar
+    sb = Sandbox.for_benchmark(repo, masks=(), home=fake_home(tmp_path), install=(), root=tmp_path / "stage",
+                               binaries=(), toolchain=chain)
+    work = tmp_path / "work"
+    work.mkdir()
+    cmd = sb.wrap(["x"], workdir=work, env={"PATH": "/usr/bin"})
+    binds = [(cmd[i + 1], cmd[i + 2]) for i, a in enumerate(cmd) if a == "--ro-bind"]
+    assert (str(real), str(real)) in binds and (str(side.resolve()), str(side.resolve())) in binds
+    assert (str(real), str(repo / ".pcp" / "_opam")) in binds, "reachable at the path PCP_COQC names"
+    assert cmd.index(str(repo / ".pcp")) < cmd.index(str(repo / ".pcp" / "_opam")), "the carve comes after the mask"
+    pairs = {cmd[i + 1]: cmd[i + 2] for i, a in enumerate(cmd) if a == "--setenv"}
+    assert pairs["PCP_COQC"] == str(repo / ".pcp" / "_opam" / "bin" / "coqc")
+    assert pairs["PCP_PET"] == str(side / "bin" / "pet")
+    assert pairs["ROCQLIB"] == str(repo / ".pcp" / "_opam" / "lib" / "coq")
+    assert set(pairs) - {"HOME", "PCP_SANDBOX"} <= set(SANDBOX_PASSTHROUGH)

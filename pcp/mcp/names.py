@@ -9,9 +9,9 @@ tool.
 from __future__ import annotations
 
 MCP_SERVER_NAME = "pcp"
-MAX_TOOLS = 12
+MAX_TOOLS = 16
 
-#: The ten tools, in the order the server registers them.
+#: The tools, in the order the server registers them.
 TOOLS: tuple[str, ...] = (
     "proof_open",
     "proof_step",
@@ -23,6 +23,10 @@ TOOLS: tuple[str, ...] = (
     "premise_search",
     "notation_resolve",
     "verify_node",
+    "proof_close",
+    "proof_expect",
+    "proof_inv",
+    "diagnosis_feedback",
 )
 assert len(TOOLS) <= MAX_TOOLS, "the tool surface is capped (PLAN.md 7)"
 
@@ -40,6 +44,10 @@ BLURBS: dict[str, str] = {
     "notation_resolve": "what a notation means, what it unfolds to, which tactics apply",
     "proof_trace": "replay a script and get the resource-ledger event log",
     "verify_node": "run the deterministic gate on a proof body",
+    "proof_close": "close a session you are done with (frees its scratch twin)",
+    "proof_expect": "assert the goal's shape before relying on it; a mismatch names the differing subterm",
+    "proof_inv": "generate the iInv pattern that opens an invariant, `>` exactly on the Timeless parts",
+    "diagnosis_feedback": "say when a failure's diagnosis named the wrong repair class",
 }
 
 

@@ -47,7 +47,7 @@ from pcp.orch.schedule import NodeOutcome, RunReport, ensure_edge, repin_edges
 from pcp.rocq.assemble import Development, NodeSpec, insert_preamble
 from pcp.rocq.decls import parse_blocks
 from pcp.rocq.lexer import first_word, identifiers, split_sentences, strip_comments
-from pcp.rocq.project import compile_text, coq_project_flags
+from pcp.rocq.project import compile_text, development_flags, write_portable_project
 from pcp.rocq.statement import statement_hash
 from pcp.util.io import atomic_write_text, copy_if_exists, ensure_dir, json_dump, read_text
 
@@ -57,7 +57,8 @@ if TYPE_CHECKING:
 
 #: How many times a decomposition killed by the clock is given more of it.
 DECOMPOSE_DEADLINE_RETRIES = 2
-STAGED_FILES = ("_CoqProject", "Makefile", "dune-project")
+#: Copied as they are; the project file is rewritten instead (``write_portable_project``).
+STAGED_FILES = ("Makefile", "dune-project")
 #: Vernacular that is only legal outside every Section: hoisted after the last Require.
 PREAMBLE_HEADS = frozenset({"Require", "From", "Import", "Export", "Declare"})
 AXIOM_HEADS = frozenset({"Axiom", "Axioms", "Parameter", "Parameters", "Conjecture"})
@@ -308,7 +309,7 @@ def apply_design(
         target_dir = ensure_dir(design_dir(workroot, root.id, round_no))
         target = target_dir / dev.path.name
         atomic_write_text(target, patched)
-        copy_if_exists(dev.path.parent / "_CoqProject", target_dir / "_CoqProject")
+        write_portable_project(dev.path, target_dir)
         if cfg.brief == "full":
             copy_if_exists(dev.path.parent / "DESIGN.md", target_dir / "DESIGN.md")
         designed = Development(target)
@@ -330,7 +331,7 @@ def apply_design(
 
 
 def _compile_or_raise(text: str, dev: Development, *, what: str, specs: Sequence[NodeSpec] = ()) -> None:
-    cres = compile_text(text, filename=dev.path.name, root=dev.root, flags=coq_project_flags(dev.root))
+    cres = compile_text(text, filename=dev.path.name, root=dev.root, flags=development_flags(dev.path))
     if cres.unavailable:
         raise ToolchainError(f"cannot check a design: {cres.unavailable}")
     if cres.timed_out:
@@ -521,6 +522,7 @@ def stage_spec_only(cfg: ProveConfig, root_id: str, *, contract: Any | None = No
         atomic_write_text(staged / p.name, read_text(p))
     for name in STAGED_FILES:
         copy_if_exists(src_dir / name, staged / name)
+    write_portable_project(Path(cfg.file), staged)
     if contract is None:
         contract = DesignContract.from_corpus(src_dir)
     json_dump(staged / "design.json", contract.to_json())

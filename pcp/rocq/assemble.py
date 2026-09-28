@@ -9,9 +9,11 @@ built on the lexer's byte offsets rather than on regexes.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from pcp.config.toolchain import project_root
 from pcp.errors import UsageError
 from pcp.rocq.decls import ProofBlock, Scope, parse_blocks, scopes_at
 from pcp.rocq.lexer import Sentence, first_word, split_sentences
@@ -244,19 +246,23 @@ def ensure_proof_using(source: str) -> str:
 
 # ------------------------------------------------------------------- stubbing
 
-def stub_proof_bodies(source: str, *, keep: set[str] | None = None) -> tuple[str, list[str]]:
+def stub_proof_bodies(source: str, *, keep: set[str] | None = None, also: set[str] | None = None) -> tuple[str, list[str]]:
     """Replace every ``Qed``-terminated proof body with ``Admitted.``
 
     Returns the rewritten source and the **module-qualified** names that were stubbed,
     so the gate can admit them as expected assumptions.  ``Defined``/``Abort``/
     ``Admitted`` blocks and anonymous blocks are left untouched: a transparent proof may
-    be computed with, and an anonymous one cannot be whitelisted by name.
+    be computed with, and an anonymous one cannot be whitelisted by name.  ``also``
+    names blocks stubbed whatever their ender (a twin's target, whose body nothing
+    later in the twin may compute with because the stepper replaces it).
     """
     keep = keep or set()
+    also = also or set()
     blocks = [
         b
         for b in parse_blocks(source)
-        if b.kind == "script" and b.ender == "Qed" and b.name and b.name not in keep
+        if b.kind == "script" and b.name and b.name not in keep
+        and (b.ender == "Qed" or (b.name in also and b.ender == "Defined"))
         and b.body_start is not None and b.ender_start is not None
     ]
     if not blocks:
@@ -274,18 +280,66 @@ def stub_proof_bodies(source: str, *, keep: set[str] | None = None) -> tuple[str
     return "".join(out), stubbed
 
 
-def stubbed_twin(path: str | Path, *, keep: str) -> Path:
-    """A statements-only twin of ``path`` beside it (``<stem>__pcpfast.v``).
+#: Where statements-only twins live, under the project root: inside the workspace, so
+#: the project's load-path flags apply to them, but never beside a source file, where
+#: ``git status``, a ``*.v`` glob or dune's ``(include_subdirs)`` would pick them up.
+TWIN_DIR = Path(".pcp") / "twins"
+FAST_INFIX = "__pcpfast"
 
-    Same directory so the project's ``-Q``/``-R`` flags apply unchanged; a distinct name
-    so nothing ``Require``s it.  Sound for the same reason as ``stub_prefix``.
+
+def twin_path(path: str | Path) -> Path:
+    """``<project root>/.pcp/twins/<dir relative to the root>/<stem>__pcpfast.v``.
+
+    The project root is the nearest ``_RocqProject``/``_CoqProject`` directory (the
+    file's own directory outside any project).  The ``__pcp`` infix keeps the twin out
+    of every "which file is the worker's" search, as before.
+    """
+    src = Path(path).resolve()
+    root = project_root(src) or src.parent
+    return root / TWIN_DIR / src.parent.relative_to(root) / f"{src.stem}{FAST_INFIX}.v"
+
+
+def stubbed_twin(path: str | Path, *, target: str | None = None) -> Path:
+    """A statements-only twin of ``path`` at :func:`twin_path`.
+
+    *Every* ``Qed`` body is stubbed, the ``target``'s own included (and a ``Defined``
+    target's): the stepper replaces the target's body, and petanque's ``start`` checks
+    the document through it, so a diverging tactic there would wedge the open meant to
+    debug it.  The twin therefore does not depend on the lemma opened, and sessions on
+    different lemmas of one file share it.  Sound for the same reason as ``stub_prefix``.
     """
     src = Path(path)
-    stubbed, _ = stub_proof_bodies(read_text(src), keep={keep})
-    twin = src.with_name(f"{src.stem}__pcpfast.v")
+    stubbed, _ = stub_proof_bodies(read_text(src), also={target} if target else None)
+    twin = twin_path(src)
     if not twin.exists() or read_text(twin) != stubbed:
+        twin.parent.mkdir(parents=True, exist_ok=True)
+        ignore = twin_root(twin) / ".gitignore"
+        if not ignore.exists():
+            atomic_write_text(ignore, "# proof-copilot's scratch twins, removed when their sessions close\n*\n")
         atomic_write_text(twin, stubbed)
     return twin
+
+
+def twin_root(twin: str | Path) -> Path:
+    """The ``.pcp/twins`` directory ``twin`` sits under."""
+    twin = Path(twin)
+    for parent in twin.parents:
+        if parent.name == TWIN_DIR.name and parent.parent.name == TWIN_DIR.parent.name:
+            return parent
+    return twin.parent
+
+
+def remove_twin(twin: str | Path) -> None:
+    """Delete ``twin`` and the directories under ``.pcp/twins`` it leaves empty."""
+    twin = Path(twin)
+    root = twin_root(twin)
+    with contextlib.suppress(OSError):
+        twin.unlink()
+    for parent in twin.parents:
+        if parent == root or not parent.is_relative_to(root):
+            break
+        with contextlib.suppress(OSError):
+            parent.rmdir()
 
 
 # ---------------------------------------------------------------------- plans

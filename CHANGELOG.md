@@ -5,6 +5,80 @@ All notable changes to proof-copilot. The format follows
 [Semantic Versioning](https://semver.org/). Install a release with
 `uv tool install --python 3.11 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@vX.Y.Z'`.
 
+## [0.4.0] - 2026-09-28
+
+Using pcp on a project with its own Rocq/Iris (for example Rocq 9.2 and Iris dev in a
+project-local `_opam`, while pcp pins Rocq 9.1.1 and Iris 4.5.0).
+
+### Added
+- pcp resolves the toolchain per project (`pcp/config/toolchain.py`). It takes `coqc` from
+  `PCP_COQC`, else the nearest `_opam`, else a non-default `PCP_OPAM_SWITCH`, else `PATH`,
+  else the pinned switch. It takes `pet` from the same switch, a sidecar, or a `PATH`/pinned
+  pet built for the *same* Rocq. `ROCQPATH`/`COQPATH` entries that belong to another switch
+  are ignored. A `dune-project` that uses `rocq`/`coq` now counts as a project root.
+- `pcp setup --for-project [DIR] [--dry-run]` builds only petanque for the project's Rocq,
+  in a separate switch `pcp-pet-rocq-<version>`. The switch has the project switch's OCaml
+  and exactly its `rocq-core`/`rocq-runtime`. The command uses a coq-lsp release if the
+  solver finds one, else pins coq-lsp's `v<major>.<minor>` branch there. No opam command
+  names the project's switch. pcp picks the sidecar up by itself (`ROCQLIB`, `OCAMLPATH`).
+- `pcp doctor --project DIR --lemma FILE:NAME --no-probe`. Doctor now answers "can pcp open
+  a lemma here?" by opening one through petanque: the first lemma of the project's smallest
+  built file, or a one-line lemma in a temporary file outside a project. On failure it
+  prints petanque's error.
+- Version floors `PCP_MIN_ROCQ`/`_COQLSP`/`_STDPP`/`_IRIS` in `toolchain.env`: what pcp
+  needs, as opposed to the pins it is tested with.
+- README / docs/INTEGRATIONS.md: "Using a project's own Rocq/Iris".
+- `pcp tools call|list|status|stop|serve`: the MCP proof tools from a shell, through a
+  per-workspace daemon (socket under `.pcp/tools/`), with no plugin and no client restart.
+- One result schema for every MCP tool: `ok`, `what`, `where` (file/line/column/sentence/step),
+  `goal`, `next`, plus `error` (cause kept, environment dump elided), `timed_out`, `lost`.
+  A failure carries the failing sentence, its location and the goal before it.
+- After each tactic, the goals in order with their shapes (new / kept / focused / closed).
+- Tactic effects in the ledger: side goals created, the occurrence a `rewrite` hit, the
+  conjuncts `iFrame` closed and the witnesses it picked, instantiated evars, and the redex
+  `wp_pures` stopped at and why. Each one says `unknown` rather than guess.
+- Hypotheses reprinted with what the printer hides: coercions (`Z.of_nat`), the carrier of
+  every equality (`[= at Z]`), implicit arguments on request.
+- `proof_expect`: assert the goal's shape, checked by Rocq, with the minimal differing subterm.
+- `proof_inv`: the `iInv … as (…) "(>H1 & H2 …)"` pattern generated from the invariant's
+  definition, `>` exactly on the Timeless conjuncts, checked speculatively.
+- Incremental `proof_trace`: reruns only from the first edited sentence (`replayed_from`).
+- `proof_close`, `diagnosis_feedback`; `pcp diagnoses` summarises hit/miss per repair class
+  from `.pcp/diagnoses.jsonl`. Diagnoses carry a repair class and a confidence.
+- An `iDestruct` that splits a `↦∗` fraction instead of the list is flagged (`fraction_split`).
+
+### Changed
+- `pcp doctor` reports the toolchain actually in use: which `coqc` and why, its prefix,
+  and the package versions read from *that* switch (coq-lsp from the pet's). It also shows
+  where `pet` comes from and the Rocq it was built for, the library roots, and ignored
+  `ROCQPATH` entries. A difference from the pins is informational. Doctor fails only on no
+  `coqc`, no petanque, a pet/`coqc` Rocq mismatch, a version below a floor, or a lemma that
+  does not open.
+- `pcp env` inside a project with a local switch prints that switch's exports.
+- `pcp prove` workers, sandboxed or not, get the development's toolchain pinned. The sandbox
+  binds its prefixes, even below a masked path.
+
+- The step count of `pcp trace` / `proof_trace` is the number of sentences run, and a
+  failed step's number matches `proof_state`'s `step`.
+- Diagnoses no longer offer generic tactic lists or leftover-resource paragraphs without
+  evidence; a focusing error suggests a bullet or `{ }`.
+- `proof_open` elaborates only the statements (the target's own body is stubbed too) and has
+  a 300 s start budget.
+
+### Fixed
+- `pcp doctor` printed "ok" for the pinned switch's packages while another `coqc` was in use.
+- `pcp trace`, the MCP server and the gate used the file's directory as the workspace, so a
+  root `_CoqProject` (`-Q theories smr`) was lost. All three now use the nearest
+  `_RocqProject`/`_CoqProject`, and the gate's scratch copies get an absolute-path project file.
+- A failed `petanque/start` reported only "Theorem not found"; it now reports the document's
+  first error before the lemma (a failing `Require`, a wrong load path, a bad statement).
+- A diverging tactic in the target's own proof wedged `proof_open` and the whole pool; a start
+  timeout is now a result naming where coqc stopped, and the pool recovers.
+- Statements-only twins (`__pcpfast.v`) are written under `.pcp/twins/` and removed on close,
+  not left beside the source.
+- A framing failure under `iMod (r.(lemma) …)` was blamed on the record `r`; it now names the
+  term to frame against the closest hypothesis ("rewrite first").
+
 ## [0.3.1] - 2026-09-23
 
 Found by driving the Claude Code plugin from a real install.

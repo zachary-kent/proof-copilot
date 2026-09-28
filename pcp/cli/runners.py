@@ -20,8 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from pcp.cli.common import absolute
+from pcp.config.env import with_runner_defaults
 from pcp.config.providers import parse_spec, resolve, resolve_effort
 from pcp.config.schema import Config
+from pcp.config.toolchain import Toolchain
+from pcp.config.toolchain import resolve as resolve_toolchain
 from pcp.errors import UsageError
 from pcp.mcp.names import parse_state_tools
 from pcp.orch.protocol import Runner
@@ -47,6 +50,7 @@ __all__ = [
     "pick_auto",
     "sandbox_for",
     "sandbox_root",
+    "toolchain_for",
     "select_approver",
     "select_decomposer",
     "select_runner",
@@ -129,6 +133,14 @@ def effort_for(role: str, cfg: Config, runner: str, *, flag: str | None) -> str 
     return resolve_effort(role, cfg) if runner in EFFORT_RUNNERS else None
 
 
+def toolchain_for(args: argparse.Namespace, fallback: Path | None = None) -> Toolchain:
+    """The toolchain of the development being proved (``args.file``), resolved here,
+    once: workers run in scratch packets whose ancestry has no project ``_opam``, so
+    they get it pinned (:meth:`Toolchain.worker_env`) instead of re-resolving it."""
+    file = absolute(getattr(args, "file", None))
+    return resolve_toolchain(file if file is not None else fallback)
+
+
 def sandbox_for(
     args: argparse.Namespace, runner_name: str, *, corpus_dir: Path, library: Sequence[Path]
 ) -> Any:
@@ -138,7 +150,8 @@ def sandbox_for(
     directory in it masked -- its own ``.pcp``, the invocation directory's, and any
     nested project's (:func:`nested_masks`) -- and, in a proof-copilot checkout, the
     checkout's ``eval/``, ``docs/``, ``tests/`` and ``.git``; a user's project keeps
-    its own.  The invocation directory's docs index is carved back.
+    its own.  The invocation directory's docs index is carved back.  The
+    development's toolchain (:func:`toolchain_for`) is bound and pinned.
     """
     from pcp.orch.runners import sandbox as sb
 
@@ -165,6 +178,7 @@ def sandbox_for(
     return sb.Sandbox.for_benchmark(
         project, reference=reference, corpus_dir=corpus, library=list(library),
         provider=provider_for(runner_name), masks=masks, docs=cwd / ".pcp" / "docs",
+        toolchain=toolchain_for(args, corpus),
     )
 
 
@@ -251,6 +265,9 @@ def select_runner(
     runner = build_runner(spec)
     if name == "auto" and not runner.available():
         raise UsageError(NO_RUNNER)
+    if sandbox is None and is_subprocess_runner(runner) and getattr(runner, "env", None) is None:
+        # Unsandboxed, the worker still runs in a scratch packet: pin the toolchain.
+        runner.env = with_runner_defaults(toolchain=toolchain_for(args, corpus_dir))  # type: ignore[attr-defined]
     return runner, notes
 
 

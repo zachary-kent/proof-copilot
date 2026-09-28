@@ -41,7 +41,7 @@ DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS = "128000"
 
 #: Variables a sandbox passes through to the worker.
 SANDBOX_PASSTHROUGH = (
-    "PATH", "LANG", "LC_ALL", "TERM", ROCQPATH, COQPATH, "OCAMLPATH", COQC, PET, PET_SERVER,
+    "PATH", "LANG", "LC_ALL", "TERM", ROCQPATH, COQPATH, "OCAMLPATH", "ROCQLIB", COQC, PET, PET_SERVER,
     PET_MEM_LIMIT_MB,  # the MCP server inside a sandbox reads it
     OPAM_SWITCH, OPAMROOT,  # so `pcp check` inside finds the same switch as outside
     CLAUDE_MAX_OUTPUT_TOKENS,
@@ -87,31 +87,38 @@ def switch_bin_dir() -> Path | None:
     return prefix / "bin" if prefix is not None else None
 
 
-def _switch_binary(name: str) -> str | None:
-    bin_dir = switch_bin_dir()
-    if bin_dir is not None and os.access(bin_dir / name, os.X_OK):
-        return str(bin_dir / name)
-    return None
+def _toolchain(root: str | Path | None):
+    from pcp.config.toolchain import resolve
+
+    return resolve(root)
 
 
-def _which(name: str) -> str | None:
-    return shutil.which(name) or _switch_binary(name)
+def coqc_binary(root: str | Path | None = None) -> str | None:
+    """The ``coqc`` for the project containing ``root`` (default: the cwd) -- see
+    :mod:`pcp.config.toolchain` for the order (``PCP_COQC``, the project's ``_opam``,
+    ``PCP_OPAM_SWITCH``, ``PATH``, the pinned switch)."""
+    return _toolchain(root).coqc
 
 
-def coqc_binary() -> str | None:
-    return os.environ.get(COQC) or shutil.which("coqc") or shutil.which("rocq") or _switch_binary("coqc") or _switch_binary("rocq")
+def pet_binary(root: str | Path | None = None) -> str | None:
+    """The stdio ``pet`` built for the same Rocq as :func:`coqc_binary`."""
+    return _toolchain(root).pet
 
 
-def pet_binary() -> str | None:
-    return os.environ.get(PET) or _which("pet")
+def pet_server_binary(root: str | Path | None = None) -> str | None:
+    return _toolchain(root).pet_server
 
 
-def pet_server_binary() -> str | None:
-    return os.environ.get(PET_SERVER) or _which("pet-server")
+def petanque_available(root: str | Path | None = None) -> bool:
+    return _toolchain(root).petanque_available
 
 
-def petanque_available() -> bool:
-    return pet_binary() is not None or pet_server_binary() is not None
+def tool_env(base: Mapping[str, str] | None = None, root: str | Path | None = None) -> dict[str, str]:
+    """``base`` (default: the process environment) made consistent with the toolchain
+    for ``root``: no other switch's libraries on ``ROCQPATH``/``COQPATH``, the
+    compiler's ``bin`` on ``PATH``, and ``ROCQLIB`` for a sidecar pet.  Every Rocq
+    child (``coqc``, ``pet``) is spawned with it."""
+    return _toolchain(root).env(base)
 
 
 def bwrap_binary() -> str | None:
@@ -130,19 +137,10 @@ def api_key(provider: str) -> str | None:
     return os.environ.get(f"{provider.upper()}_API_KEY")
 
 
-def library_roots() -> list[Path]:
-    """Rocq library roots: every existing ``ROCQPATH``/``COQPATH`` entry, then the pinned switch's."""
-    out: list[Path] = []
-    for var in (ROCQPATH, COQPATH):
-        for entry in (os.environ.get(var) or "").split(os.pathsep):
-            if entry:
-                p = Path(entry)
-                if p.is_dir() and p not in out:
-                    out.append(p)
-    switch = switch_user_contrib()
-    if switch is not None and switch not in out:
-        out.append(switch)
-    return out
+def library_roots(root: str | Path | None = None) -> list[Path]:
+    """Rocq library roots for the toolchain in use: every ``ROCQPATH``/``COQPATH`` entry
+    that is not another switch's, then the compiler's own ``user-contrib``."""
+    return _toolchain(root).library_roots()
 
 
 def switch_user_contrib(switch: str | None = None) -> Path | None:
@@ -154,7 +152,8 @@ def switch_user_contrib(switch: str | None = None) -> Path | None:
 def with_switch_path(env: Mapping[str, str]) -> dict[str, str]:
     """``env`` with the pinned switch's ``bin`` *appended* to ``PATH`` (absent entries
     only): a worker's own ``coqc``/``rocq`` calls find the switch without ``pcp env``,
-    and anything the operator put on PATH still wins."""
+    and anything the operator put on PATH still wins.  (A project toolchain is pinned
+    for workers explicitly, by :meth:`Toolchain.exports`.)"""
     out = dict(env)
     bin_dir = switch_bin_dir()
     if bin_dir is None:
@@ -165,11 +164,11 @@ def with_switch_path(env: Mapping[str, str]) -> dict[str, str]:
     return out
 
 
-def iris_root() -> Path | None:
+def iris_root(root: str | Path | None = None) -> Path | None:
     """The first library root that contains the Iris sources."""
-    for root in library_roots():
-        if (root / "iris").is_dir():
-            return root
+    for lib in library_roots(root):
+        if (lib / "iris").is_dir():
+            return lib
     return None
 
 
@@ -191,9 +190,16 @@ def with_library_root(env: dict[str, str], extra: Path) -> dict[str, str]:
     return out
 
 
-def with_runner_defaults(env: Mapping[str, str] | None = None) -> dict[str, str]:
+def with_runner_defaults(env: Mapping[str, str] | None = None, *, toolchain=None) -> dict[str, str]:
     """``env`` (default: the process environment) plus the defaults every model CLI
-    run gets unless the operator chose otherwise."""
+    run gets unless the operator chose otherwise.
+
+    ``toolchain`` (a :class:`pcp.config.toolchain.Toolchain`, resolved for the
+    development) is pinned explicitly (:meth:`~pcp.config.toolchain.Toolchain.worker_env`):
+    a worker runs in a scratch packet, and from there it would re-resolve pcp's
+    default toolchain instead of the project's ``_opam`` or sidecar."""
     out = with_switch_path(os.environ if env is None else env)
+    if toolchain is not None:
+        out = toolchain.worker_env(out)
     out.setdefault(CLAUDE_MAX_OUTPUT_TOKENS, DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS)
     return out

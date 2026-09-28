@@ -161,6 +161,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="check the toolchain, its pins, packaged assets and provider logins")
     doctor.add_argument("--config", type=Path, default=None)
+    doctor.add_argument("--project", type=Path, default=None, metavar="DIR",
+                        help="report the toolchain of the project at DIR (default: the cwd's)")
+    doctor.add_argument("--no-probe", dest="probe", action="store_false",
+                        help="skip the live check (open a lemma through petanque, run one tactic)")
+    doctor.add_argument("--lemma", default=None, metavar="FILE:NAME",
+                        help="the lemma the live check opens (default: the first lemma of the project's "
+                             "smallest built file; outside a project, a one-line temporary lemma)")
     doctor.set_defaults(func=_dispatch("cmd_doctor", "cmd_doctor"))
 
     setup = sub.add_parser("setup", help="build the pinned Rocq/Iris/coq-lsp opam switch (idempotent)")
@@ -169,10 +176,14 @@ def build_parser() -> argparse.ArgumentParser:
                        help="opam switch to build (default: $PCP_OPAM_SWITCH, else the pinned name `pcp`)")
     setup.add_argument("--jobs", type=int, default=None, metavar="N", help="parallel opam jobs (default: all cores)")
     setup.add_argument("--force", action="store_true", help="run the script even when every pin already matches")
+    setup.add_argument("--for-project", nargs="?", const=Path("."), type=Path, default=None, metavar="DIR",
+                       help="instead: build only petanque for the Rocq of the project at DIR (default: .), in a "
+                            "separate sidecar switch; the project's own switch is never touched")
     setup.set_defaults(func=_dispatch("cmd_setup", "cmd_setup"))
 
-    envp = sub.add_parser("env", help='print shell exports for the pinned switch: eval "$(pcp env)"')
-    envp.add_argument("--switch", default=None, metavar="NAME", help="default: $PCP_OPAM_SWITCH, else `pcp`")
+    envp = sub.add_parser("env", help='print shell exports for the toolchain in use: eval "$(pcp env)"')
+    envp.add_argument("--switch", default=None, metavar="NAME",
+                      help="default: the project's local _opam if there is one, else $PCP_OPAM_SWITCH, else `pcp`")
     envp.set_defaults(func=_dispatch("cmd_setup", "cmd_env"))
 
     init = sub.add_parser("init", help="make a directory a pcp project: write .pcp/config.toml, git-ignore .pcp/")
@@ -207,6 +218,10 @@ def build_parser() -> argparse.ArgumentParser:
     trace.add_argument("-o", "--out", type=Path, default=None)
     trace.add_argument("--reflect", action="store_true", help="use the Ltac2 iDump path")
     trace.add_argument("--oracle", action="store_true", help="run the persistence oracle per step")
+    trace.add_argument(
+        "--workspace", type=Path, default=None,
+        help="petanque workspace (default: the nearest directory with a _RocqProject/_CoqProject)",
+    )
     trace.set_defaults(func=_dispatch("cmd_trace", "cmd_trace"))
 
     state = sub.add_parser("state", help="budgeted render of a traced state")
@@ -231,9 +246,44 @@ def build_parser() -> argparse.ArgumentParser:
     destruct.add_argument("--name", default="H")
     destruct.set_defaults(func=_dispatch("cmd_trace", "cmd_destruct"))
 
+    diagnoses = sub.add_parser("diagnoses", help="hit/miss counts of the step diagnoses, from .pcp/diagnoses.jsonl")
+    diagnoses.add_argument("--workspace", type=Path, default=None,
+                           help="project root (default: nearest _RocqProject/_CoqProject, else .)")
+    diagnoses.add_argument("--by", default="repair", choices=("repair", "family", "tactic_head", "confidence"))
+    diagnoses.add_argument("--wrong", action="store_true", help="list the diagnoses marked wrong instead")
+    diagnoses.add_argument("--json", action="store_true")
+    diagnoses.set_defaults(func=_dispatch("cmd_diagnoses", "cmd_diagnoses"))
+
     mcp = sub.add_parser("mcp", help="run the MCP server on stdio")
     mcp.add_argument("--workspace", type=Path, default=Path("."))
     mcp.set_defaults(func=_dispatch("cmd_mcp", "cmd_mcp"))
+
+    tools_common = argparse.ArgumentParser(add_help=False)
+    tools_common.add_argument("--workspace", type=Path, default=None,
+                              help="project root the daemon serves (default: nearest _RocqProject/_CoqProject, else .)")
+    tools_common.add_argument("--factory", default=None, help=argparse.SUPPRESS)
+    tools = sub.add_parser("tools", help="the MCP proof tools (proof_open, proof_step, ...) from a shell, "
+                                         "through a per-workspace daemon")
+    tools_sub = tools.add_subparsers(dest="tools_action")
+    tcall = tools_sub.add_parser("call", parents=[tools_common],
+                                 help="call one tool and print its JSON result (starts the daemon if needed)")
+    tcall.add_argument("tool", help="proof_open, proof_step, proof_state, ... (see `pcp tools list`)")
+    tcall.add_argument("args_json", nargs="?", default=None, metavar="JSON",
+                       help="the arguments as one JSON object ('-' reads stdin)")
+    tcall.add_argument("--arg", action="append", default=None, metavar="KEY=VALUE",
+                       help="one argument; VALUE is parsed as JSON when it parses, else taken as a string (repeatable)")
+    tcall.add_argument("--no-start", action="store_true", help="fail instead of starting a daemon")
+    tcall.add_argument("--idle-timeout", type=float, default=7200.0, metavar="S",
+                       help="a daemon this call starts stops after S idle seconds (default 7200; 0: never)")
+    tcall.add_argument("--timeout", type=float, default=None, metavar="S", help="stop waiting for the result after S seconds")
+    tcall.add_argument("--compact", action="store_true", help="one-line JSON")
+    tools_sub.add_parser("list", parents=[tools_common], help="the tools and their arguments")
+    tools_sub.add_parser("status", parents=[tools_common], help="the daemon's pid, uptime and open sessions")
+    tools_sub.add_parser("stop", parents=[tools_common], help="stop the daemon and every pet it runs")
+    tserve = tools_sub.add_parser("serve", parents=[tools_common], help="run the daemon in the foreground")
+    tserve.add_argument("--idle-timeout", type=float, default=7200.0, metavar="S",
+                        help="stop after S idle seconds (default 7200; 0: never)")
+    tools.set_defaults(func=_dispatch("cmd_tools", "cmd_tools"), tools_action=None)
 
     docs = sub.add_parser("docs", help="build a local, grep-able index of the installed Rocq libraries")
     docs.add_argument("-o", "--out", type=Path, default=Path(".pcp/docs/index.txt"))

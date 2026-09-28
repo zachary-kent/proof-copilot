@@ -1,7 +1,7 @@
 ---
 name: iris-proving
-description: Prove or debug a Rocq/Iris lemma interactively with the pcp proof-state tools (proof_open, proof_step, proof_ledger, proof_destruct, premise_search, verify_node) and the pcp prover norms. Use when writing or repairing an Iris proof by hand, when a spatial hypothesis goes missing, iFrame/iDestruct/iApply fails, or a pcp run handed off a stuck node.
-allowed-tools: Bash(pcp skill show *) Bash(pcp trace *) Bash(pcp ledger *) Bash(pcp state *) Bash(pcp destruct *)
+description: Prove or debug a Rocq/Iris lemma interactively with the pcp proof-state tools (proof_open, proof_step, proof_trace, proof_ledger, proof_destruct, proof_inv, proof_expect, premise_search, verify_node) and the pcp prover norms. Use when writing or repairing an Iris proof by hand, when a spatial hypothesis goes missing, iFrame/iDestruct/iApply fails, or a pcp run handed off a stuck node.
+allowed-tools: Bash(pcp skill show *) Bash(pcp trace *) Bash(pcp ledger *) Bash(pcp state *) Bash(pcp destruct *) Bash(pcp tools *)
 ---
 
 # Proving Iris lemmas with pcp
@@ -11,19 +11,35 @@ allowed-tools: Bash(pcp skill show *) Bash(pcp trace *) Bash(pcp ledger *) Bash(
 Step the proof through the `pcp` MCP tools instead of editing the file and recompiling.
 Paths are relative to the project root.
 
+Every answer has the same head: `ok`, `what` (one line), `where` (`file`, `line`,
+`column`, `sentence`, `step`), `goal` (the rendered goals: after the step on success,
+the goals the failing sentence met on failure) and `next` (concrete next calls). A
+failure adds `error` (the cause is kept, even when cut), `timed_out`, or `lost`. Read
+`what` and `next` first; the rest is detail.
+
 1. `proof_open(file, lemma)` -- a session id and the Iris goal, per hypothesis
    (spatial / intuitionistic / pure). `fast` (default) elaborates only the statements
    before the lemma: seconds, not minutes.
-2. `proof_step(session, tactic)` -- one tactic sentence; the answer is what changed. On
-   failure read the structured diagnosis before retrying. `mode="speculative"` does not
-   move the session.
+2. `proof_step(session, tactic)` -- one tactic sentence; the answer is what changed.
+   When the goals change, `goal_list` lists them in order with their shapes (`new` /
+   `kept`, which is `focused`, what `closed`): check it after `wp_apply`, `iSplit`,
+   `destruct` instead of guessing where a side goal went. `warnings` flags a success that
+   is often a mistake. On failure read `diagnosis` (with `diagnosis_class` and
+   `diagnosis_confidence`: a `low` one is a lead, not an answer) before retrying; if its
+   class was wrong, `diagnosis_feedback(diagnosis_id, actual=...)`. `mode="speculative"`
+   does not move the session.
 3. `proof_try(session, [t1, ..., t20])` -- when unsure between candidates, try them all
    at once and keep a survivor. Cheap; use it instead of guessing serially.
 4. `proof_state(session, select=..., budget=...)` -- the goal under a token budget,
    diff-only by default; `select` ("HP,H*,spatial,mentions:γ,head:WP") pins what you need.
-5. When the proof is written, `verify_node(file, lemma, body)` runs the same gate a pcp
-   run uses (compile, `Print Assumptions` whitelist, no admits or escape hatches). Only
-   then edit the `.v` file.
+5. `proof_expect(session, "WP ! #(l +ₗ 1) {{ v, Φ v }}")` -- assert the goal's shape
+   before relying on it (`_`/`?x` holes); a mismatch names the differing subterm.
+   `proof_inv(session, "Hinv")` generates the `iInv ... as (...) "(>H1 & ...)"` pattern
+   from the invariant's definition -- never hand-write one.
+6. When the proof is written, `verify_node(file, lemma, body)` runs the same gate a pcp
+   run uses (compile, `Print Assumptions` whitelist, no admits or escape hatches); a
+   finished `proof_step` puts the exact call in `next`. Only then edit the `.v` file.
+   `proof_close(session)` when you are done with a session.
 
 ## When resources go wrong -- ask the ledger, do not guess
 
@@ -32,7 +48,11 @@ Paths are relative to the project root.
 - `"where_did_it_go"` for the provenance of a hypothesis, `"leftovers"` for why
   `iFrame`/`done` fails, `"unused_at_qed"` for dead hypotheses, `"events"` for the log.
 - `proof_trace(file, lemma)` replays an existing proof (or `script`) and returns the
-  ledger events plus a session to query -- start here for a broken existing proof.
+  ledger events plus a session to query -- start here for a broken existing proof. A
+  failure's `where` has the sentence and its line/column, `goal` the goal it met; the
+  session sits right before it, so `proof_step` a replacement there. After editing the
+  file, `proof_trace` again: only the sentences from the first changed one rerun
+  (`replayed_from`, `saved_ms`).
 - `unknown` from the ledger means it cannot tell. Treat it as no answer, not a hint.
 
 ## Patterns, names, notations
@@ -46,8 +66,12 @@ Paths are relative to the project root.
   tactics apply.
 
 A tool answer with `"lost": true` means the Rocq process restarted: `proof_open` again
-and replay; it is not a tactic failure. Without the MCP tools the CLI does the same
-offline: `pcp trace FILE LEMMA -o t.jsonl`, `pcp ledger t.jsonl blame --hyp HP`,
+and replay; it is not a tactic failure. Without the MCP tools (plugin not loaded yet in
+this session) the same tools run from Bash through a per-project daemon that keeps the
+sessions alive between commands: `pcp tools call proof_open '{"file": "F.v", "lemma": "L"}'`,
+then `pcp tools call proof_step --arg session=s1 --arg 'tactic=iIntros "H".'`; every tool
+and argument is the same (`pcp tools list`), and `pcp tools stop` ends it. Offline, on a
+recorded trace: `pcp trace FILE LEMMA -o t.jsonl`, `pcp ledger t.jsonl blame --hyp HP`,
 `pcp state t.jsonl --select spatial`, `pcp destruct 'PROP'`.
 
 ## Norms

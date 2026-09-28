@@ -192,9 +192,9 @@ def _explain(
                        step_timeout=step_timeout, verbose=verbose,
                        incomplete=_INCOMPLETE in _as_result(output).output)
     finally:
-        for leftover in (twin, twin.with_name(f"{twin.stem}__pcpfast.v")):
-            with contextlib.suppress(OSError):
-                leftover.unlink()
+        # Its statements-only twin under .pcp/twins goes when the replay's session closes.
+        with contextlib.suppress(OSError):
+            twin.unlink()
 
 
 def twin_path(root: Path, path_name: str) -> Path:
@@ -209,8 +209,8 @@ def twin_path(root: Path, path_name: str) -> Path:
 def open_session(pool: Any, file: Path, thm: str, *, step_timeout: float = 30.0, stub_prefix: bool = False) -> Any:
     """A ``ProofSession`` on ``file``/``thm`` from ``pool`` (the pool owns the process).
 
-    ``stub_prefix`` opens the statements-only twin beside ``file`` -- never used on a
-    corpus file, only on scratch copies, because it writes next to the source.
+    ``stub_prefix`` opens the statements-only twin (under the project's ``.pcp/twins``,
+    removed when the session closes).
     """
     return pool.open(file, thm, step_timeout=step_timeout, stub_prefix=stub_prefix)
 
@@ -224,12 +224,15 @@ def _replay(
 
     own_pool = pool is None
     if own_pool:
+        from pcp.config.toolchain import project_root
         from pcp.state.pool import SessionPool
 
         # The wall budget is the worker's clock: `petanque/start` on the twin is bounded
-        # by it too, not by petanque's 600 s default.
-        pool = SessionPool(twin.parent, size=1, start_timeout=max(60.0, budget_seconds))
+        # by it too, not by petanque's 600 s default.  The workspace is the project root,
+        # where coq-lsp reads the load-path flags.
+        pool = SessionPool(project_root(twin) or twin.parent, size=1, start_timeout=max(60.0, budget_seconds))
     ran = 0
+    session = None
     try:
         session = open_session(pool, twin, located.name, step_timeout=step_timeout, stub_prefix=True)
         tracer = attach(Tracer(session))
@@ -243,6 +246,8 @@ def _replay(
     except PcpError as exc:
         return _quiet(f"the replay could not run: {exc}", verbose)
     finally:
+        if session is not None and hasattr(session, "close"):
+            session.close()
         if own_pool:
             pool.close()
 

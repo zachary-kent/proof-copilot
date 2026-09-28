@@ -14,14 +14,28 @@ Policy, in priority order (each is explicit here, not implicit in loop order):
    the goal's head symbols, every spatial hypothesis stays;
 4. changed hypotheses are allocated budget before unchanged ones, spatial before
    intuitionistic before pure; pure hypotheses take part in the diff too.
+
+What the printer hides (``pcp.state.printing``) is marked on the line it misleads: a
+hidden coercion adds a ``↳ with coercions`` line with the explicit form, equalities are
+flagged with their carrier (``[= at Z]``), and implicit arguments -- mostly noise --
+are shown only for a hypothesis selected explicitly.
+
+:func:`goal_list` is the other half of "what changed" (pcp-issues MF3): when a step
+changes the number or the identity of the goals, the goals after it are listed in
+order, each with a one-line shape (:func:`goal_shape`), which one is focused, which
+are new and which goal was closed -- so "did ``wp_apply`` leave a side goal, and where
+did it go?" is read off the result instead of guessed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
-from pcp.state.digest import PropStore, Selector, estimate_tokens, heads, render_prop
+from pcp.state.digest import PropStore, Selector, estimate_tokens, head_symbol, heads, render_prop
 from pcp.state.ipm.model import Hyp, IrisGoal
+from pcp.state.ledger.diff import align_goals
+from pcp.state.printing import GoalHidden, Hidden
 from pcp.state.tactic import parse_tactic
 
 
@@ -66,6 +80,7 @@ def render_goal(
     store: PropStore | None = None,
     fold_over_lines: int = 4,
     show_pure: bool = True,
+    hidden: GoalHidden | None = None,
 ) -> Rendered:
     sel = Selector.parse(select)
     prev_hashes = {h.id: h.hash for h in prev.all_hyps} if prev is not None else {}
@@ -74,6 +89,11 @@ def render_goal(
     describe = goal.modality.describe()
     header = f"goal {goal.goal_id}" + (f" · {describe}" if describe != "—" else "")
     goal_line = "⊢ " + render_prop(goal.goal, mode, fold_over_lines=fold_over_lines, hash=goal.goal_hash)
+    goal_hidden = hidden.goal if hidden is not None else None
+    carrier = _carrier_bit(goal_hidden)
+    goal_line += f"   [{carrier}]" if carrier else ""
+    if mode in ("full", "folded"):
+        goal_line += _hidden_lines(goal_hidden, explicit=False)
     spent = estimate_tokens(header) + estimate_tokens(goal_line)
 
     relevant = _relevant_set(goal, relevant_to) if relevance else None
@@ -100,7 +120,9 @@ def render_goal(
                     manifest.append(f"{h.id}~")
                     continue
             priority = 0 if explicit else _priority(klass, changed)
-            candidates.append(_Line(h, klass, _hyp_line(h, mode, fold_over_lines), priority, order))
+            detail = hidden.get(h) if hidden is not None else None
+            candidates.append(_Line(h, klass, _hyp_line(h, mode, fold_over_lines, detail, explicit=explicit),
+                                    priority, order))
 
     accepted: set[int] = set()
     elided: list[str] = []
@@ -136,14 +158,36 @@ def _priority(klass: str, changed: bool) -> int:
     return base if changed else base + 3
 
 
-def _hyp_line(h: Hyp, mode: str, fold_over_lines: int) -> str:
+def _hyp_line(h: Hyp, mode: str, fold_over_lines: int, hidden: Hidden | None = None, *, explicit: bool = False) -> str:
     name = ", ".join(h.names) if len(h.names) > 1 else h.id
     text = render_prop(h.prop, mode, fold_over_lines=fold_over_lines, hash=h.hash)
-    return f'  "{name}" : {text}' + _flags(h)
+    extra = _hidden_lines(hidden, explicit=explicit) if mode in ("full", "folded") else ""
+    return f'  "{name}" : {text}' + _flags(h, hidden) + extra
 
 
-def _flags(h: Hyp) -> str:
+def _hidden_lines(hidden: Hidden | None, *, explicit: bool) -> str:
+    """The explicit forms under a line: coercions always, implicit arguments on request."""
+    if not hidden:
+        return ""
+    out = ""
+    if hidden.coercions and hidden.explicit:
+        out += f"\n      ↳ with coercions ({', '.join(hidden.coercions)}): {' '.join(hidden.explicit.split())}"
+    if explicit and hidden.implicit:
+        out += f"\n      ↳ with implicit arguments: {' '.join(hidden.implicit.split())}"
+    return out
+
+
+def _carrier_bit(hidden: Hidden | None) -> str:
+    if hidden is None or not hidden.carriers:
+        return ""
+    return "= at " + ", ".join(hidden.carriers[:3]) + (", …" if len(hidden.carriers) > 3 else "")
+
+
+def _flags(h: Hyp, hidden: Hidden | None = None) -> str:
     bits = []
+    carrier = _carrier_bit(hidden)
+    if carrier:
+        bits.append(carrier)
     if h.persistent:
         bits.append("persistent")
     elif h.persistent is False and h.klass == "spatial":
@@ -176,3 +220,86 @@ def _relevant_set(goal: IrisGoal, relevant_to: str | None) -> set[str] | None:
 
 def _k(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+# ------------------------------------------------------------------ goal shapes
+
+#: Width of a goal's shape line.
+SHAPE_CHARS = 100
+#: A few head symbols read better as words.
+_HEAD_WORDS = {"⌜⌝": "pure ⌜…⌝", "∗": "∗ (sep)", "-∗": "-∗ (wand)", "∃": "∃", "∀": "∀", "∧": "∧", "∨": "∨"}
+
+
+def goal_shape(goal: IrisGoal, width: int = SHAPE_CHARS) -> str:
+    """``<kind> · <conclusion, one line>``: what a tactic will meet at this goal.
+
+    The kind is the head of the conclusion as the IPM sees it -- a WP (with its
+    expression), an update ``|={E}=>``, a later, a pure ``⌜…⌝``, a connective -- or a
+    Coq-level equality for a goal outside the IPM, since the tactics that apply
+    (``wp_*`` / ``iMod`` / ``iPureIntro`` / ``lia`` / ``f_equal``) are chosen by it.  An
+    atom is its own shape.
+    """
+    m = goal.modality
+    text = " ".join(goal.goal.split())
+    if m.wp is not None:
+        kind = ("TWP " if m.wp.total else "WP ") + m.wp.expr_summary
+    elif m.fupd:
+        kind = f"|={{{m.mask}}}=>" if m.mask else "fupd"
+    elif m.bupd:
+        kind = "|==>"
+    elif m.except0:
+        kind = "◇"
+    elif m.laters:
+        kind = "▷" if m.laters == 1 else f"▷^{m.laters}"
+    else:
+        head = head_symbol(text) if text else ""
+        if not goal.is_ipm and head == "=":
+            kind = "Coq equality"
+        else:
+            kind = _HEAD_WORDS.get(head, head)
+    if not kind or kind == text:
+        line = text
+    else:
+        line = f"{kind} · {text}"
+    return line if len(line) <= width else line[: width - 1].rstrip() + "…"
+
+
+def goal_list(before: list[IrisGoal], after: list[IrisGoal]) -> dict[str, Any] | None:
+    """The goals after a step, in order, when it changed their number or identity; else ``None``.
+
+    ``status`` is ``new`` for a goal the step produced (from the focused goal, or from
+    several at once under ``all:``), ``kept`` for one it left alone; ``focused`` marks
+    the goal the next tactic runs on.  ``closed`` lists the goals that are gone.  A step
+    that just transforms the focused goal (one in, one out) is not a change of goals
+    and gets no list -- the rendered goal already shows it.
+    """
+    al = align_goals(list(before), list(after))
+    if before and len(after) == len(before) and len(al.children) == 1 and len(al.touched) <= 1:
+        return None
+    if not before and not after:
+        return None
+    produced = {id(g) for g in al.children}
+    goals = [
+        {"n": i, "id": g.goal_id, "shape": goal_shape(g), "status": "new" if id(g) in produced else "kept",
+         "focused": i == 1}
+        for i, g in enumerate(after, start=1)
+    ]
+    closed = [goal_shape(g) for g in al.touched] if not al.children else []
+    return {"before": len(before), "after": len(after), "goals": goals, "closed": closed}
+
+
+def n_goals(n: int) -> str:
+    return f"{n} goal{'s' if n != 1 else ''}"
+
+
+def describe_goal_list(change: dict[str, Any] | None) -> str:
+    """One clause for a ``what`` line: ``1 goal → 3 (2 new)``, ``goal closed, 2 left``."""
+    if change is None:
+        return ""
+    new = sum(1 for g in change["goals"] if g["status"] == "new")
+    before, after = change["before"], change["after"]
+    if after == 0:
+        return "no goals left"
+    if change["closed"] and not new:
+        return f"goal closed, {after} left" + (f"; now focused: {change['goals'][0]['shape']}" if after else "")
+    return f"{before} goal{'s' if before != 1 else ''} → {after} ({new} new)"

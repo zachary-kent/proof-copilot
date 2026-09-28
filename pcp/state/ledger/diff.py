@@ -41,6 +41,8 @@ from pcp.state.props import normalize_prop, prop_hash
 from pcp.state.tactic import TacticCall, parse_tactic
 
 EVAR = "?_"
+#: Prefix of an event ``detail`` that is a warning about a *successful* step.
+WARNING = "warning: "
 
 DESTRUCT_HEADS: frozenset[str] = frozenset({"iDestruct", "iMod", "iInv", "iPoseProof", "iDestructHyp"})
 INTRO_HEADS: frozenset[str] = frozenset({"iIntros", "iIntro"})
@@ -242,6 +244,20 @@ def diff_step(prev_goals: list[IrisGoal], next_goals: list[IrisGoal], *, step: i
     return _split(ctx, al.parent, al.children)
 
 
+def step_events(prev_goals: list[IrisGoal], next_goals: list[IrisGoal], *, step: int, tactic: str) -> list[Event]:
+    """The resource events of a step followed by its tactic effects (``effects.py``)."""
+    from pcp.state.ledger.effects import step_effects  # effects builds on this module's alignment
+
+    return diff_step(prev_goals, next_goals, step=step, tactic=tactic) + step_effects(
+        prev_goals, next_goals, step=step, tactic=tactic
+    )
+
+
+def step_warnings(events: Sequence[Event]) -> list[str]:
+    """The warnings among a step's events: what a successful ``proof_step`` should say aloud."""
+    return [e.detail[len(WARNING):] for e in events if e.detail.startswith(WARNING)]
+
+
 def attach(tracer: Any) -> Any:
     """Hook the ledger into a ``Tracer``: every successful step's events go to ``trace.events``.
 
@@ -253,7 +269,7 @@ def attach(tracer: Any) -> Any:
 
     def on_step(step: Step, prev: list[IrisGoal]) -> None:
         if step.ok:
-            trace.events.extend(diff_step(list(prev), list(step.goals), step=step.step, tactic=step.tactic))
+            trace.events.extend(step_events(list(prev), list(step.goals), step=step.step, tactic=step.tactic))
 
     tracer.on_step = on_step
     return tracer
@@ -272,7 +288,7 @@ def replay_events(steps: Sequence[Step]) -> list[Event]:
         if not s.ok:
             break
         if prev is not None:
-            out += diff_step(prev, list(s.goals), step=s.step, tactic=s.tactic)
+            out += step_events(prev, list(s.goals), step=s.step, tactic=s.tactic)
         prev = list(s.goals)
     return out
 
@@ -485,7 +501,56 @@ def _single(ctx: _Ctx, parent: IrisGoal, child: IrisGoal) -> list[Event]:
     for name in produced:
         out.append(ctx.event(kind, gid, hyp=name, sources=sources, targets=targets, klass=pr.klass_of(name)))
     out += _persistent_uses(ctx, parent, child, produced)
+    out += _fraction_splits(ctx, parent, child, pr)
     out += _modality_events(ctx, parent, child)
+    return out
+
+
+# ------------------------------------------------------------ fraction splits
+
+#: ``l ↦{dq} v`` / ``l ↦∗{dq} vs`` / ``l ↦ v``: location, arrow, fraction, value.
+_POINTSTO = re.compile(r"^(?P<loc>.+?)\s*(?P<op>↦∗|↦)\s*(?:\{(?P<q>[^{}]*)\})?\s*(?P<val>.+)$", re.S)
+
+
+def _pointsto(prop: str) -> tuple[str, str, str, str] | None:
+    m = _POINTSTO.match(normalize_prop(prop))
+    if m is None or m.group("val").startswith(("□", "_")):
+        return None
+    q = "".join((m.group("q") or "#1").split())
+    return m.group("loc").strip(), m.group("op"), q, " ".join(m.group("val").split())
+
+
+def _fraction_splits(ctx: _Ctx, parent: IrisGoal, child: IrisGoal, pr: _Pair) -> list[Event]:
+    """A points-to that came apart into several copies of itself at smaller fractions.
+
+    ``iDestruct "Hc" as "(H0 & H1 & H2 & _)"`` on ``c ↦∗ [v0; v1; v2]`` goes through
+    ``IntoSep`` via ``Fractional``: it halves the *permission* repeatedly instead of
+    splitting the cells, the step succeeds, and only a later ``wp_load`` fails ("cannot
+    find c ↦ ?").  The ordinary ``Split`` event is accurate but silent about that, so
+    this annotation carries the warning (issue 9).
+    """
+    before = {h.id: h for h in parent.spatial}
+    after = {h.id: h for h in child.spatial}
+    sources = [n for n in (*pr.consumed_spatial, *pr.spatial.updated) if n in before]
+    pieces = [n for n in (*pr.spatial.produced, *pr.spatial.updated) if n in after]
+    out: list[Event] = []
+    for name in sources:
+        pt = _pointsto(before[name].prop)
+        if pt is None:
+            continue
+        loc, op, q, val = pt
+        same = [n for n in pieces if (p := _pointsto(after[n].prop)) is not None and p[:2] == (loc, op) and p[3] == val and p[2] != q]
+        if len(same) < 2:
+            continue
+        fracs = ", ".join(f"{{{_pointsto(after[n].prop)[2]}}}" for n in same)  # type: ignore[index]
+        detail = f"split the fraction of `{loc} {op} {val}` into {fracs} (Fractional)"
+        if op == "↦∗":
+            # Halving one cell (`[Hl1 Hl2]` on `l ↦ v`) is an idiom; halving an array
+            # when cells were meant is the silent mistake, so only that one warns.
+            detail = (f"{WARNING}{ctx.call.head or 'the tactic'} {detail}, not the list; to split the cells use "
+                      f'`array_cons` (`iDestruct (array_cons with "{name}") as "[H0 {name}]"`), or '
+                      "`array_app` / `array_singleton` / `big_sepL` over the `array` definition")
+        out.append(ctx.event("FractionSplit", child.goal_id, hyp=name, sources=[name], targets=same, detail=detail))
     return out
 
 

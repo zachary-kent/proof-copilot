@@ -7,7 +7,11 @@ with ``Bash`` can grep it out.  So this wraps a runner's command in ``bwrap`` wi
 **allowlist**, not a blocklist:
 
 * ``$HOME`` replaced by a tmpfs, with only the provider's credential files bound back;
-* the project read-only with the answer-key subtrees masked, and pcp's own install
+* the project read-only with the answer-key subtrees masked, the toolchain resolved
+  for the development read-only (every opam prefix it reads -- a project ``_opam``, a
+  sidecar switch -- carved back even under a mask) and pinned in the environment
+  (the worker's cwd is a scratch packet, from which the project's ``_opam`` cannot be
+  re-discovered), and pcp's own install
   (interpreter prefix, package, ``pcp`` entry point) read-only so ``pcp check`` runs
   whether pcp is a checkout's venv or a ``uv tool`` install under ``$HOME``;
 * exactly one writable directory: the attempt's own workdir;
@@ -44,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from pcp.config.env import SANDBOX, SANDBOX_PASSTHROUGH, bwrap_binary, opam_root, with_runner_defaults
+from pcp.config.toolchain import Toolchain
 from pcp.errors import ToolchainError
 from pcp.orch.protocol import NodePayload, NodeResult
 from pcp.util.hashing import content_hash, short_hash
@@ -158,11 +163,13 @@ class Sandbox:
     refresh_credentials: bool = True
     #: Emit ``--clearenv``: ``None`` probes the binary, ``True``/``False`` force it.
     clearenv: bool | None = None
+    #: The development's toolchain: its prefixes are bound, its binaries pinned.
+    toolchain: Toolchain | None = None
 
     def environment(self, env: Mapping[str, str] | None = None) -> dict[str, str]:
         """The allowlisted environment the sandboxed command runs with -- and the
         environment the ``bwrap`` process itself must be started with."""
-        environ = with_runner_defaults(env)
+        environ = with_runner_defaults(env, toolchain=self.toolchain)
         out = {"HOME": str(self.home.resolve()), SANDBOX: "1"}
         for name in self.env_passthrough:
             value = environ.get(name)
@@ -180,7 +187,7 @@ class Sandbox:
         library: Sequence[Path] = (),
         network: bool = True,
         provider: str = "anthropic",
-        toolchain: Path | None = None,
+        toolchain: Toolchain | None = None,
         docs: Path | None = None,
         binaries: Sequence[str] | None = None,
         home: Path | None = None,
@@ -199,10 +206,13 @@ class Sandbox:
         always masked; the corpus under test, the docs index and any curated library
         are carved back out afterwards.  ``install`` (default :func:`install_paths`)
         is pcp's own installation, bound read-only so ``pcp check`` exists inside.
+        ``toolchain`` is the one resolved for the development (``None``: the worker
+        resolves its own, which from a scratch packet is pcp's default); the opam root
+        is bound either way, for the pinned switch and any sidecar.
         """
         repo = Path(repo).resolve()
         real_home = Path(home) if home is not None else user_home()
-        ro = [repo, Path(toolchain) if toolchain is not None else opam_root()]
+        ro = [repo, opam_root()]
         ro += [Path(p) for p in (install if install is not None else install_paths())]
         masked = list(dict.fromkeys([repo / ".pcp", *(repo / sub for sub in masks)]))
         if reference is not None:
@@ -222,6 +232,7 @@ class Sandbox:
             home=real_home,
             root=root,
             refresh_credentials=True,
+            toolchain=toolchain,
         )
 
     # ---------------------------------------------------------------- wrap
@@ -304,6 +315,18 @@ class Sandbox:
             resolved = Path(path).resolve()
             if resolved.exists():
                 mounts.add(resolved, _CARVE, ["--ro-bind", str(resolved), str(resolved)])
+        # The toolchain is carved back like the corpus: a project ``_opam`` below a
+        # masked subtree must stay executable.  A prefix reached through a symlink
+        # under a mask is bound at the link's path too -- the pinned PCP_COQC names it.
+        masked = [Path(m).resolve() for m in self.masked]
+        for prefix in self.toolchain.prefixes() if self.toolchain is not None else ():
+            where = Path(prefix).absolute()
+            real = where.resolve()
+            if not real.exists():
+                continue
+            mounts.add(real, _CARVE, ["--ro-bind", str(real), str(real)])
+            if where != real and any(where.is_relative_to(m) for m in masked):
+                mounts.add(where, _CARVE, ["--ro-bind", str(real), str(where)])
         work = Path(workdir).resolve()
         mounts.add(work, _CARVE, ["--bind", str(work), str(work)])
         cmd += mounts.ordered()

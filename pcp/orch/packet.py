@@ -37,11 +37,13 @@ from pcp.orch.protocol import (
     TASK_FILE,
 )
 from pcp.rocq.assemble import Development, NodeSpec
+from pcp.rocq.project import write_portable_project
 from pcp.util.io import atomic_write_text, copy_if_exists, ensure_dir, json_dump, read_text, rm_tree
 from pcp.util.text import one_line
 
 PLACEHOLDER_BODY = "admit."
-PROJECT_FILES = ("_CoqProject", "Makefile", "dune-project")
+#: Copied as they are; the project file is rewritten for the packet (``write_portable_project``).
+PROJECT_FILES = ("Makefile", "dune-project")
 #: Enough to name a solution plus its project files and a paper in two formats.
 LIBRARY_LISTING = 12
 EVIDENCE_LIMIT = 4000
@@ -143,6 +145,7 @@ def build_packet(
     atomic_write_text(scratch, assembly.text)
     for name in PROJECT_FILES:
         copy_if_exists(dev.path.parent / name, workdir / name)
+    write_portable_project(dev.path, workdir)
 
     if state_tools:
         # Rooted per node so a worker's proof sessions cannot reach another node's
@@ -210,10 +213,9 @@ def render_task(
     index_path: str | Path | None = None,
 ) -> str:
     """``TASK.md``, sections in the contract's order (§3.1).  Same inputs, same bytes."""
-    del dev
     # None means "whatever is on this machine"; [] means "none" -- collapsing the two
     # once silently dropped the documentation section on the eval path.
-    docs = default_docs(index_path) if docs is None else docs
+    docs = default_docs(index_path, project=dev.path) if docs is None else docs
     parts: list[str] = []
     parts.append(f"# Prove `{node.name}`\n")
     parts.append(
@@ -420,7 +422,7 @@ def _library_note(path: Path) -> str:
     return ""
 
 
-def default_docs(index_path: str | Path | None = None) -> list[tuple[str, str]]:
+def default_docs(index_path: str | Path | None = None, *, project: str | Path | None = None) -> list[tuple[str, str]]:
     """Local documentation a worker can reach with no network: the index (if given and
     present) and the Iris sources from the configured library roots.  ``index_path``
     must be absolute -- library code never resolves against the current directory."""
@@ -431,7 +433,9 @@ def default_docs(index_path: str | Path | None = None) -> list[tuple[str, str]]:
             raise ValueError(f"index_path must be absolute, got {index}")
         if index.exists():
             out.append(("every declaration in Iris and std++, one per line", str(index)))
-    root = iris_root()
+    # The Iris of the development's own toolchain (its project switch, say), never
+    # the one the orchestrator's cwd happens to resolve to.
+    root = iris_root(project)
     if root is not None:
         out.append(("the Iris and std++ sources themselves", str(root)))
     return out
