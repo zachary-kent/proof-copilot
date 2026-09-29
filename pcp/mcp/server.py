@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from pcp import __version__
-from pcp.config.toolchain import project_root
+from pcp.config.toolchain import project_root, workspace_for
 from pcp.errors import PcpError, StateError, ToolchainError, UsageError
 from pcp.mcp.names import MAX_TOOLS, MCP_SERVER_NAME, TOOLS
 from pcp.mcp.result import BLOCK_KEYS, conform, failure, one_line, result, where
@@ -62,7 +62,8 @@ from pcp.rocq.assemble import Development, parse_plan
 from pcp.rocq.body import strip_proof_wrapper
 from pcp.rocq.decls import find_block
 from pcp.rocq.errors import shape_error
-from pcp.rocq.lexer import terminate_sentence
+from pcp.rocq.lexer import split_sentences, terminate_sentence
+from pcp.state.candidates import closest_survivor
 from pcp.state.diagnose import diagnose_structured, error_family
 from pcp.state.diagnosis_log import record_diagnosis, record_feedback
 from pcp.state.invariant import invariant_pattern
@@ -114,6 +115,15 @@ TRY_ERROR_CHARS = 400
 VERIFY_TIMEOUT = 600.0
 #: Open sessions kept; beyond this the oldest is closed (its twin released).
 MAX_SESSIONS = 64
+#: ``proof_trace(events=...)``: the whole ledger log, the steps near where the trace
+#: ends (the default), or none.  A 180-sentence replay's full log ran to ~60 KB, past
+#: what an MCP client returns inline (session 3, issue 20); ``proof_ledger(s, "events")``
+#: still has every event.
+TRACE_EVENTS = ("near", "all", "none")
+#: How many steps before the end (or the failure) ``events="near"`` keeps.
+TRACE_EVENT_WINDOW = 5
+#: At most this many warnings in a trace result, each with its step.
+TRACE_WARNINGS = 20
 LEDGER_QUERIES = ("where_did_it_go", "blame", "leftovers", "unused_at_qed", "events")
 #: How often the parent watch looks at ``getppid``.
 PARENT_WATCH_INTERVAL_S = 2.0
@@ -253,7 +263,10 @@ class PcpServer:
         if not resolved.is_dir():
             placeholder = " (an unexpanded template placeholder? the host must substitute it)" if "${" in str(workspace) else ""
             raise UsageError(f"--workspace {workspace!r} does not exist{placeholder}")
-        self.workspace = resolved
+        #: Where the host launched us (Claude Code: the git root); the workspace is the
+        #: pcp project in or around it, which relative paths and ``.pcp/`` belong to.
+        self.launch_dir = resolved
+        self.workspace = workspace_for(resolved)
         self.pool_size = pool_size
         #: Where ``IDump.vo`` is built for ``reflect=True``.  Absolute, under the
         #: workspace by default -- never relative to the process's cwd.
@@ -331,13 +344,22 @@ class PcpServer:
         rec.session.close()
 
     def _resolve(self, file: str | Path) -> Path:
+        """Absolute as given; relative to the project, else to where the host launched us
+        (a path copied from the host's own listing is relative to *its* directory)."""
         p = Path(file).expanduser()
-        return p.resolve() if p.is_absolute() else (self.workspace / p).resolve()
+        if p.is_absolute():
+            return p.resolve()
+        mine = (self.workspace / p).resolve()
+        if mine.exists() or self.launch_dir == self.workspace:
+            return mine
+        theirs = (self.launch_dir / p).resolve()
+        return theirs if theirs.exists() else mine
 
     def _file(self, file: str) -> Path:
         path = self._resolve(file)
         if not path.is_file():
-            raise UsageError(f"{file}: no such file (resolved against {self.workspace})")
+            also = f" and {self.launch_dir}" if self.launch_dir != self.workspace else ""
+            raise UsageError(f"{file}: no such file (resolved against {self.workspace}{also})")
         return path
 
     def _rel(self, path: str | Path) -> str:
@@ -501,6 +523,8 @@ class PcpServer:
             hints = [f"the tactic ran past its time budget: try a more targeted one, or proof_try({_q(sid)}, [variants])"]
             if typeclass_debug:
                 hints.append("`typeclass_debug` has the instance search it was stuck in")
+            if confident:
+                hints.insert(0, f"`diagnosis` names the likely cause ({dx['diagnosis_class']}, high confidence)")
         else:
             what = f"`{one_line(tactic, 80)}` failed" + (f" at step {n}" if n is not None else "") + f": {one_line(error)}"
             hints = []
@@ -543,12 +567,15 @@ class PcpServer:
         select: str | None = None,
         budget: int = DEFAULT_STEP_BUDGET,
         tool: str = "proof_step",
+        first_step: int | None = None,
     ) -> dict[str, Any]:
-        """A committed sentence: what changed, the goals in order when they changed, warnings, effects."""
+        """A committed sentence (or, from ``first_step``, a chain): what changed, the goals
+        in order when they changed, warnings, effects."""
         sid = rec.id
         rendered = self._render(rec, step.goals, prev=before, select=select, budget=budget, at=step)
         rec.seen_step = step.step
-        events = rec.trace.events_at(step.step)
+        events = [e for k in range(first_step if first_step is not None else step.step, step.step + 1)
+                  for e in rec.trace.events_at(k)]
         warnings = step_warnings(events)
         change = goal_list(before, step.goals)
         finished = rec.trace.finished
@@ -683,6 +710,9 @@ class PcpServer:
                 if change is not None:
                     out["goal_list"] = change
                 return self._sections(out, SectionContext("proof_step", rec, tactic, before, after, None, True))
+            sentences = [x.text.strip() for x in split_sentences(tactic)]
+            if len(sentences) > 1:
+                return self._step_chain(rec, sentences, before, select=select, budget=budget)
             step = rec.tracer.step(tactic)
             last = rec.tracer.last_result
             if not step.ok:
@@ -690,6 +720,40 @@ class PcpServer:
                                           timed_out=bool(last and last.timed_out) or _is_timeout(step.error),
                                           typeclass_debug=last.typeclass_debug if last else None)
             return self._step_success(rec, tactic, before, step, select=select, budget=budget)
+
+    def _step_chain(self, rec: SessionRecord, sentences: list[str], before: list[IrisGoal], *,
+                    select: str | None, budget: int) -> dict[str, Any]:
+        """Several sentences in one ``proof_step``: each is its own step (session 3, issue 23).
+
+        Run as one, a failure deep in the chain came back with the goal from before the
+        whole chain and no word on which sentence failed.  Stepped one by one, the failure
+        is the failing sentence's, against the goal it met; the ones before it stay
+        committed (as in ``proof_trace``), and the result says so.
+        """
+        sid, n = rec.id, len(sentences)
+        first: int | None = None
+        for i, sentence in enumerate(sentences, 1):
+            at = rec.final_goals
+            step = rec.tracer.step(sentence)
+            first = step.step if first is None else first
+            if not step.ok:
+                last = rec.tracer.last_result
+                out = self._step_failure(rec, sentence, at, step.error, step=step,
+                                         timed_out=bool(last and last.timed_out) or _is_timeout(step.error),
+                                         typeclass_debug=last.typeclass_debug if last else None)
+                out["what"] = one_line(f"sentence {i}/{n} of the chain: {out['what']}")
+                done = (f"sentences 1-{i - 1} were committed (steps {first}-{step.step - 1})" if i > 1
+                        else "nothing was committed")
+                out["next"].insert(0, f"{done}: proof_step({_q(sid)}, ...) from `{one_line(sentence, 60)}` on, not the whole chain")
+                out["chain"] = {"sentences": n, "failed": i, "committed": i - 1, "sentence": sentence}
+                return out
+            if rec.trace.finished and i < n:
+                break
+        out = self._step_success(rec, " ".join(sentences), before, step, select=select, budget=budget, first_step=first)
+        out["chain"] = {"sentences": n, "committed": i, "steps": [first, step.step]}
+        if i < n:
+            out["next"].insert(0, f"the proof finished after sentence {i}/{n}; the rest was not run")
+        return out
 
     @_guard(lost=True)
     def proof_state(
@@ -749,8 +813,12 @@ class PcpServer:
 
     @_guard(lost=True)
     def proof_trace(
-        self, file: str, lemma: str, script: list[str] | None = None, *, incremental: bool = True
+        self, file: str, lemma: str, script: list[str] | None = None, *, incremental: bool = True,
+        events: str = "near",
     ) -> dict[str, Any]:
+        if events not in TRACE_EVENTS:
+            message = f"events={events!r}; one of {', '.join(TRACE_EVENTS)}"
+            return failure(message, message, next=[f"events is one of {', '.join(TRACE_EVENTS)}"])
         path = self._file(file)
         tactics = list(script) if script is not None else None
         places = None
@@ -761,10 +829,10 @@ class PcpServer:
                                where=self._lemma_where(path, lemma),
                                next=[f"proof_trace({_q(self._rel(path))}, {_q(lemma)}, script=[...])"])
             tactics, places = own
-        return self._trace(path, lemma, tactics, places, incremental=incremental)
+        return self._trace(path, lemma, tactics, places, incremental=incremental, events=events)
 
     def _trace(self, path: Path, lemma: str, tactics: list[str], places: list[SentenceAt] | None,
-               *, incremental: bool) -> dict[str, Any]:
+               *, incremental: bool, events: str = "near") -> dict[str, Any]:
         """Replay ``tactics``, reusing the last trace's states up to the first changed sentence (D5)."""
         key = replay_key(path, lemma, stub_prefix=True, workspace=self._root_for(path))
         session, tracer, _ = self._new_session(path, lemma, reflect=False, fast=True)
@@ -790,16 +858,31 @@ class PcpServer:
                 # The process went away under the reused states: forget them and run in full, once.
                 self.replays.drop(key)
                 self._drop(rec)
-                return self._trace(path, lemma, tactics, places, incremental=False)
+                return self._trace(path, lemma, tactics, places, incremental=False, events=events)
             self.replays.put(key, tracer.replay_entry())
-            return self._trace_result(rec, path, lemma, reused=reused, saved_ms=entry.saved_ms(k) if entry and reused is not None else 0)
+            return self._trace_result(rec, path, lemma, reused=reused, saved_ms=entry.saved_ms(k) if entry and reused is not None else 0,
+                                      events=events)
 
-    def _trace_result(self, rec: SessionRecord, path: Path, lemma: str, *, reused: int | None, saved_ms: int) -> dict[str, Any]:
+    @staticmethod
+    def _trace_events(trace: Any, end: int, mode: str) -> tuple[list[str], list[str]]:
+        """The rendered events ``mode`` keeps, and the warnings (with their steps), for a trace ending at ``end``."""
+        warnings = [f"step {getattr(e, 'step', '?')}: {w}" for e in trace.events for w in step_warnings([e])]
+        if mode == "all":
+            kept = list(trace.events)
+        elif mode == "near":
+            kept = [e for e in trace.events if (at := getattr(e, "step", None)) is not None and at > end - TRACE_EVENT_WINDOW]
+        else:
+            kept = []
+        return [e.render() for e in kept], warnings[:TRACE_WARNINGS]
+
+    def _trace_result(self, rec: SessionRecord, path: Path, lemma: str, *, reused: int | None, saved_ms: int,
+                      events: str = "near") -> dict[str, Any]:
         trace = rec.trace
         final = trace.final
         sid, file = rec.id, self._rel(path)
         n = final.step if final is not None else 0
         k = reused or 0
+        shown, warnings = self._trace_events(trace, trace.failed_at if trace.failed_at is not None else n, events)
         fields: dict[str, Any] = {
             "session": sid,
             # The number of sentences run, the failed one included: the same
@@ -807,8 +890,9 @@ class PcpServer:
             "steps": n,
             "finished": trace.finished,
             "error": shape_error(trace.error) if trace.error else None,
-            "events": [e.render() for e in trace.events],
-            "warnings": step_warnings(trace.events),
+            "events": shown,
+            "events_total": len(trace.events),
+            "warnings": warnings,
             # Incremental replay: the first sentence actually re-run (0: from `start`,
             # nothing reused; k+1: the root and k sentences were the last trace's).
             "replayed_from": k + 1 if reused is not None else 0,
@@ -827,7 +911,7 @@ class PcpServer:
             info["error"] = shape_error(info["error"])
             if info.get("line") is not None:
                 info["file"] = file
-            info["goal"] = [r.text for r in self._render(rec, failed.goals, diff_only=False, at=failed)]
+            met = [r.text for r in self._render(rec, failed.goals, diff_only=False, at=failed)]
             dx = self._diagnosis(failed.tactic, trace.error, list(failed.goals))
             info["diagnosis"] = dx.pop("diagnosis")
             info.update(dx)
@@ -837,12 +921,14 @@ class PcpServer:
             place = (f"edit {file}:{info['line']}" if info.get("line") is not None
                      else f"change sentence {failed.step} of `script`")
             fields.pop("error")
+            # `error` and `goal` are the block's; `failure` does not repeat them (issue 20).
+            error = info.pop("error")
             out = failure(
                 (trace.failure_note() or "stopped") + reuse,
-                info["error"],
+                error,
                 where=where(file=file, line=info.get("line"), column=info.get("column"), sentence=failed.tactic,
                             step=failed.step),
-                goal=info["goal"],
+                goal=met,
                 next=[f"proof_step({_q(sid)}, replacement) -- the session is at the state before `{one_line(failed.tactic, 60)}`",
                       f"or {place} and proof_trace({_q(file)}, {_q(lemma)}) again: only the sentences from the edit on rerun"],
                 timed_out=timed_out,
@@ -850,6 +936,7 @@ class PcpServer:
             )
             if len(failed.goals) > 1:
                 out["goal_shapes"] = [goal_shape(g) for g in failed.goals]
+            self._events_hint(out, sid, events)
             return self._sections(out, SectionContext("proof_trace", rec, failed.tactic, list(failed.goals), None, failed, False,
                                                       list(trace.events)))
         goals = list(final.goals) if final is not None else []
@@ -866,9 +953,17 @@ class PcpServer:
         out = result(True, what + reuse, where=where(file=file, step=n), goal=goal, next=hints, **fields)
         if len(goals) > 1:
             out["goal_list"] = goal_list([], goals)
+        self._events_hint(out, sid, events)
         prev = trace.step_at(n - 1) if n > 0 else None
         return self._sections(out, SectionContext("proof_trace", rec, final.tactic if final and n else None,
                                                   list(prev.goals) if prev else [], goals, final, True, list(trace.events)))
+
+    @staticmethod
+    def _events_hint(out: dict[str, Any], sid: str, mode: str) -> None:
+        if len(out["events"]) < out["events_total"]:
+            which = f"the last {TRACE_EVENT_WINDOW} steps'" if mode == "near" else "no"
+            out["next"].append(f"`events` has {which} ledger events of {out['events_total']}: "
+                               f'proof_ledger({_q(sid)}, "events") has them all')
 
     @_guard(lost=True)
     def proof_close(self, session: str) -> dict[str, Any]:
@@ -945,6 +1040,13 @@ class PcpServer:
                         row["shape"] = goal_shape(after[0])
                 rows.append(row)
         survivors = [row["tactic"] for row in rows if row["ok"]]
+        for row in rows:
+            if not row["ok"] and survivors:
+                # What separates it from a near-identical survivor (session 3, issue 22).
+                close = closest_survivor(row["tactic"], survivors)
+                if close is not None:
+                    close.pop("changed_tokens")
+                    row["vs_survivor"] = close
         finishing = [row["tactic"] for row in rows if row["ok"] and row["proof_finished"]]
         what = f"{len(survivors)}/{len(batch)} candidates survive" + (f"; {len(finishing)} finish the proof" if finishing else "")
         best = finishing[0] if finishing else (survivors[0] if survivors else None)
@@ -1158,7 +1260,9 @@ def tool_functions(server: PcpServer) -> dict[str, Callable[..., str]]:
         them in order with their shapes (new / kept / focused, and what closed).  `warnings`
         flags a success that is often a mistake (e.g. a fraction split); `effects` says what the
         step did to the goal.  A failure carries the step, the goal it met, the error and a
-        structured diagnosis with its repair class and confidence -- read it before retrying."""
+        structured diagnosis with its repair class and confidence -- read it before retrying.
+        Several sentences (`"wp_store. wp_pures."`) run one by one in commit mode: a failure names
+        the failing sentence (`chain`), and the ones before it stay committed."""
         return _dumps(server.proof_step(session, tactic, mode=mode, select=select or None, budget=budget))
 
     def proof_state(
@@ -1176,15 +1280,19 @@ def tool_functions(server: PcpServer) -> dict[str, Callable[..., str]]:
             diff_only=diff_only, relevance=relevance,
         ))
 
-    def proof_trace(file: str, lemma: str, script: list[str] | None = None, incremental: bool = True) -> str:
+    def proof_trace(
+        file: str, lemma: str, script: list[str] | None = None, incremental: bool = True, events: str = "near",
+    ) -> str:
         """Replay a script (default: the lemma's own proof) tactic by tactic; returns the ledger event log and a session.
 
         On a failure, `failure` (and `where`) has the failing `sentence`, its `line`/`column` in the
         file (default script only), the error, a diagnosis and the goal it was applied to; its
         `step` is the number `proof_state` uses (0 = root, k = after the k-th sentence).  After an
         edit, only the sentences from the first changed one rerun (`replayed_from`, `saved_ms`);
-        `incremental=false` forces a full run."""
-        return _dumps(server.proof_trace(file, lemma, script, incremental=incremental))
+        `incremental=false` forces a full run.  `events` is near (default: the ledger events of the
+        last steps before the end or the failure) | all | none; proof_ledger(session, "events") has
+        the whole log."""
+        return _dumps(server.proof_trace(file, lemma, script, incremental=incremental, events=events))
 
     def proof_ledger(session: str, query: str, hyp: str = "", step: int = -1) -> str:
         """Ask the resource ledger: where did a hypothesis go, what consumed it, what is still live, what was never used.
@@ -1197,7 +1305,8 @@ def tool_functions(server: PcpServer) -> dict[str, Callable[..., str]]:
         """Run up to 20 candidate tactics speculatively from the current state and report which survive.
 
         Each surviving row says how many goals it leaves and, when it changes them, lists them in
-        order with their shapes -- a side goal is often what decides between two survivors."""
+        order with their shapes -- a side goal is often what decides between two survivors.  A failed
+        row that is a near variant of a survivor says how they differ (`vs_survivor`)."""
         return _dumps(server.proof_try(session, tactics))
 
     def proof_destruct(session: str, hyp: str, spec: dict[str, Any] | None = None, apply: bool = False) -> str:

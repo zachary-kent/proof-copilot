@@ -115,6 +115,60 @@ def project_root(start: str | Path) -> Path | None:
     return found.parent if found is not None else None
 
 
+#: Directories never searched for a project below a workspace (switches, builds, VCS).
+_SEARCH_SKIP = frozenset({"_opam", "_build", "node_modules", "__pycache__", "venv"})
+#: How deep below a workspace a project is looked for (``repo/project/`` is depth 1).
+WORKSPACE_SEARCH_DEPTH = 3
+
+
+def _is_project_dir(d: Path) -> bool:
+    return (d / ".pcp" / "config.toml").is_file() or any((d / n).is_file() for n in PROJECT_FILES) or _dune_rocq_project(d) is not None
+
+
+def _projects_below(start: Path, depth: int) -> list[Path]:
+    """Project directories below ``start``, shallowest first; a project's own subtree is not searched."""
+    found: list[Path] = []
+    level = [start]
+    for _ in range(depth):
+        nxt: list[Path] = []
+        for d in level:
+            try:
+                children = sorted(c for c in d.iterdir() if c.is_dir() and not c.is_symlink())
+            except OSError:
+                continue
+            for c in children:
+                if c.name.startswith(".") or c.name in _SEARCH_SKIP:
+                    continue
+                (found if _is_project_dir(c) else nxt).append(c)
+        if found:
+            return found
+        level = nxt
+    return found
+
+
+def workspace_for(start: str | Path) -> Path:
+    """The pcp project a tool host launched in ``start`` works on (session 3, issue 19).
+
+    A host passes the directory it was started in -- Claude Code's
+    ``${CLAUDE_PROJECT_DIR}`` is the *git* root, which may hold the project one level
+    down (``repo/proj/_CoqProject``).  Relative paths, the answers' paths and the run
+    state (``.pcp/``) are all the project's, so the MCP server and the CLI daemon agree:
+    ``start`` itself when it is a project (``.pcp/config.toml``, ``_*Project``, a Rocq
+    ``dune-project``); else the nearest project above it; else the one project below it
+    (among several, the one with a ``.pcp/config.toml``); else ``start``.
+    """
+    here = Path(start).resolve()
+    if _is_project_dir(here):
+        return here
+    above = project_root(here)
+    if above is not None:
+        return above.resolve()
+    below = _projects_below(here, WORKSPACE_SEARCH_DEPTH)
+    if len(below) > 1:
+        below = [d for d in below if (d / ".pcp" / "config.toml").is_file()]
+    return below[0] if len(below) == 1 else here
+
+
 def local_switch(start: str | Path) -> Path | None:
     """The prefix of the nearest local opam switch (``<dir>/_opam``) at or above ``start``."""
     for d in _ancestors(Path(start)):

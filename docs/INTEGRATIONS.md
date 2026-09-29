@@ -110,8 +110,14 @@ The server resolves every `file` argument, and starts its Rocq sessions, relativ
 workspace. An interactive session works on one project, the directory Claude Code was
 started in, so the plugin passes `${CLAUDE_PROJECT_DIR}`. Claude Code substitutes that
 in plugin MCP args. A literal `.` would depend on the server's cwd; the placeholder does
-not. This was checked headlessly: `proof_open("nope.v", …)` answers
-`no such file (resolved against <project dir>)`. Workers never use this entry: each one
+not. That directory is often the git root rather than the project (`repo/proj/_CoqProject`),
+so the server (and the `pcp tools` daemon, by the same rule) works on the pcp project at,
+above, or below it: the directory itself if it is a project (`.pcp/config.toml`,
+`_RocqProject`/`_CoqProject`, a Rocq `dune-project`), else the nearest project above it,
+else the only project below it (among several, the one with `.pcp/config.toml`). Relative
+paths are the project's; a path relative to the launch directory is still found. Run state
+(`.pcp/`) goes to the project, next to a `.gitignore` that keeps it out of commits.
+Workers never use this entry: each one
 gets its own `.mcp.json` rooted in its node workdir (`pcp.mcp.config.write_mcp_config`).
 
 ### The norms: `pcp skill show`
@@ -230,7 +236,8 @@ a failure adds `error`, and `timed_out` or `lost` when that is what happened
   For a switch with another name, set `PCP_OPAM_SWITCH` in the server's environment (`env`
   in the JSON, `[mcp_servers.pcp.env]` in TOML).
 - **"no such file (resolved against DIR)".** Paths are relative to the workspace, which is
-  the project root. If DIR is not your project, see "Which workspace" above.
+  the project root. If DIR is not your project (for example, two projects below the git
+  root and neither has `.pcp/config.toml`), see "Which workspace" above.
 - **`iris-proving` fails to load with `invalid choice: 'skill'`.** The installed pcp
   predates `pcp skill`. Upgrade it.
 - **A tool answers `"lost": true`.** The Rocq process restarted. Call `proof_open` again.

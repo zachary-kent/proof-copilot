@@ -135,9 +135,11 @@ def test_trace_failure_and_hidden_coercions_end_to_end(ws: Path) -> None:
         failure = out["failure"]
         assert out["steps"] == 2 and failure["step"] == 2
         assert (failure["sentence"], failure["line"], failure["column"], failure["file"]) == ("exact Heq.", 8, 3, "Coe.v")
-        assert "@eq Z (Z.of_nat sq2) (Z.of_nat k)" in failure["error"]
-        # The goal it was applied to, with the coercion that made `exact Heq` wrong spelled out.
-        (goal,) = failure["goal"]
+        assert "@eq Z (Z.of_nat sq2) (Z.of_nat k)" in out["error"]
+        # The goal it was applied to, with the coercion that made `exact Heq` wrong spelled out;
+        # `failure` does not repeat the block's goal and error (session 3, issue 20).
+        assert "goal" not in failure and "error" not in failure
+        (goal,) = out["goal"]
         assert '"Heq" : sq2 = k   [= at Z]' in goal and "↳ with coercions (Z.of_nat): Z.of_nat sq2 =@{Z} Z.of_nat k" in goal
         assert '"Hn" : sq2 = k   [= at nat]' in goal and goal.count("↳") == 1
         state = server.proof_state(out["session"])

@@ -72,7 +72,8 @@ ERROR_CHARS = 1200
 #: The repair a diagnosis points at: what the feedback log counts hits and misses by.
 RepairClass = Literal[
     "bullet", "rewrite-before-frame", "check-lemma-premise", "fix-pattern", "fix-intro-pattern",
-    "missing-hypothesis", "fix-apply", "close-goal", "mask", "wp-next-step", "goal-shape", "unknown",
+    "missing-hypothesis", "fix-apply", "close-goal", "mask", "wp-next-step", "goal-shape",
+    "strip-later", "beta-reduce", "already-simplified", "unknown",
 ]
 Confidence = Literal["high", "low"]
 
@@ -145,6 +146,13 @@ def _goal_parts(call: TacticCall, error: str, family: str, goal: IrisGoal) -> li
     parts: list[_Part] = []
     if family == "frame":
         return [_frame_report(error, call, goal)]
+    # The routine mistakes that came back `unknown` (session 3, issue 21) are decided by
+    # the goal, not the tactic's family, so they lead when they fire.
+    if _timed_out(error):
+        parts.append(_beta_report(call, goal))
+    parts.append(_later_report(call, goal, error))
+    if call.head.startswith("rewrite") or call.head == "erewrite":
+        parts.append(_rewrite_report(call, goal, error))
     if call.head in PATTERN_HEADS:
         parts.append(_pattern_report(call, goal, error))
     if not any(p.text for p in parts) and call.head in INTRO_HEADS:
@@ -561,8 +569,12 @@ def _wp_report(call: TacticCall, goal: IrisGoal, error: str) -> _Part:
     expr = wp_expr(goal.goal)
     if expr is None:
         if goal.goal.strip():
-            return _Part(f"the goal is not a WP at its head (`{_one_line(goal.goal, 100)}`), so `{call.head}` has "
-                         "nothing to step", "wp-next-step", "high", ["goal head is not WP"])
+            flat = " ".join(goal.goal.split())
+            after = ("`iModIntro` (then `iApply` the postcondition)" if flat.startswith(("|={", "|==>", "◇"))
+                     else "the postcondition's own tactics (`iApply \"HΦ\"`, `iFrame`)")
+            return _Part(f"the goal no longer contains a WP (`{_one_line(goal.goal, 100)}`), so `{call.head}` has "
+                         "nothing to step: did the previous tactic already run the program to a value? "
+                         f"Continue with {after}", "already-simplified", "high", ["goal head is not WP"])
         return _Part("")
     red = next_redex(expr)
     if red.kind == "unknown":
@@ -635,8 +647,10 @@ def _focus_report(error: str, n_goals: int | None) -> _Part:
         return _Part(f"bullet mismatch: the current goal is not finished, or the next goal expects the bullet{want}. "
                      "Close the current goal before the next bullet, and keep one bullet symbol per nesting level.",
                      "bullet", "high", ["error: bullet mismatch"])
-    return _Part("no goal is focused here: the previous bullet or `{ }` block already closed its goal. "
-                 "Use the next bullet (or `}`) to move to the remaining goals.", "bullet", "high", ["error: no focused goal"])
+    return _Part("no goal is focused here: the previous bullet or `{ }` block already closed its goal, or the "
+                 "previous tactic already discharged this side goal (`//`, `by`, a `wp_*` that solved a pure side "
+                 "condition) -- drop the sentence, or use the next bullet (or `}`) to move to the remaining goals.",
+                 "bullet", "high", ["error: no focused goal"])
 
 
 # -------------------------------------------------------------------- framing
@@ -756,3 +770,123 @@ def _frame_report(error: str, call: TacticCall, goal: IrisGoal) -> _Part:
 
 def _dedupe_str(items: list[str]) -> list[str]:
     return list(dict.fromkeys(items))
+
+
+# --------------------------------------------------- routine mistakes (session 3)
+
+_NAME_SPLIT = re.compile(r"[\s\[\]$%#!>/*-]+")
+
+
+def _timed_out(error: str) -> bool:
+    low = _low(error)
+    return "timeout!" in low or "timed out" in low
+
+
+def _named_hyps(call: TacticCall) -> list[str]:
+    """Every hypothesis name inside the tactic's quoted strings (``"[HA $HB]"`` -> HA, HB)."""
+    out: list[str] = []
+    for text in call.all_strings:
+        out += [w for w in _NAME_SPLIT.split(text) if w and w not in out]
+    return out
+
+
+def _later_report(call: TacticCall, goal: IrisGoal, error: str) -> _Part:
+    """A hypothesis the tactic uses is still under ``▷``: name the step that strips it.
+
+    ``▷`` over a ``match`` on an ``option`` is the trap: the step that strips laters
+    (``wp_load``, ``iNext``) leaves it alone because nothing is a later at the head
+    once the match does not reduce, so the match must be destructed first.
+    Destructing the hypothesis itself (``iDestruct "H" as …``) is fine through a later
+    over a separating conjunction, so that alone does not fire.
+    """
+    names = _named_hyps(call)
+    subject = call.strings[0] if call.head in PATTERN_HEADS and call.strings else None
+    for name in names:
+        hyp = next((h for h in goal.ipm_hyps if h.id == name), None)
+        prop = " ".join((hyp.prop if hyp is not None else "").split())
+        if not prop.startswith("▷"):
+            continue
+        inner = prop.lstrip("▷ ").lstrip("( ")
+        under_match = inner.startswith("match ")
+        if name == subject and not under_match:
+            continue
+        lines = [f'"{name}" is under a later (`{_one_line(prop, 90)}`), so `{call.head}` sees the ▷, not what is under it']
+        if under_match:
+            lines.append("the ▷ sits over a `match`: the steps that strip laters do not reach under a match that does "
+                         "not reduce -- destruct its scrutinee first (`destruct x as [|]`, or the `iDestruct` that "
+                         "produced it), before the step that strips the later")
+        else:
+            goal_later = " ".join(goal.goal.split()).startswith("▷")
+            lines.append("strip it first: " + ("`iNext` (the goal has a ▷ too)" if goal_later else
+                         f'a program step (`wp_pures`/`wp_load` strip one later), `iModIntro` under a later goal, or '
+                         f'`iDestruct "{name}" as ">{name}"` when it is timeless'))
+        confident = under_match or "▷" in error or "later" in _low(error) or _misfit_error(error) or _unify_error(error)
+        return _Part("\n".join(lines), "strip-later", "high" if confident else "low", [f'"{name}" : {_one_line(prop, 60)}'])
+    return _Part("")
+
+
+def _unify_error(error: str) -> bool:
+    return any(m in _low(error) for m in _UNIFY_MARKERS)
+
+
+def beta_redexes(prop: str) -> list[str]:
+    """``(λ b, …) arg`` sub-terms of ``prop``: a function literal already applied to an argument."""
+    out: list[str] = []
+    i = 0
+    while True:
+        m = _LAMBDA.search(prop, i)
+        if m is None:
+            return out
+        end = _close_paren(prop, m.start())
+        if end is None:
+            return out
+        rest = prop[end + 1:]
+        arg = _ARG.match(rest)
+        if arg is not None:
+            body = " ".join(prop[m.start(): end + 1].split())
+            out.append(f"{_one_line(body, 50)} {arg.group(1)}")
+        i = m.end()
+
+
+_LAMBDA = re.compile(r"\((?:λ|fun)\s")
+_ARG = re.compile(r"\s+([\w'.#]+|\([^()]*\))")
+
+
+def _close_paren(text: str, start: int) -> int | None:
+    depth = 0
+    for j in range(start, len(text)):
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+    return None
+
+
+def _beta_report(call: TacticCall, goal: IrisGoal) -> _Part:
+    """A timeout against a goal with an unreduced β-redex: higher-order unification loops on it."""
+    redexes = beta_redexes(goal.goal)
+    if not redexes:
+        return _Part("")
+    unifies = call.head in APPLY_HEADS or call.head in {"iExact", "iSpecialize", "iAssumption", "apply", "exact"}
+    text = (f"the goal contains an unreduced β-redex `{redexes[0]}`; unifying against it can send higher-order "
+            "unification into a loop, which is the timeout. Reduce it first (`simpl`, `cbn beta`, or `rewrite /=`), "
+            "or instantiate the arguments explicitly so nothing is left to guess (`iApply (\"H\" $! _ _ false)`)")
+    return _Part(text, "beta-reduce", "high" if unifies else "low", [f"β-redex in goal: {redexes[0]}"])
+
+
+_NO_SUBTERM = re.compile(r"found no subterm matching\s+\"?(.*?)\"?\s+in (?:the current goal|\S+)", re.I | re.S)
+
+
+def _rewrite_report(call: TacticCall, goal: IrisGoal, error: str) -> _Part:
+    """``rewrite`` found nothing to rewrite: the previous tactic may have simplified it away."""
+    m = _NO_SUBTERM.search(error or "")
+    if m is None and "nothing to rewrite" not in _low(error):
+        return _Part("")
+    what = f"`{_one_line(m.group(1), 80)}`" if m else "the left-hand side"
+    return _Part(f"the goal no longer contains {what}: did the previous tactic (`wp_pures`, `simpl`, a `/=`, an "
+                 "earlier `rewrite`) already rewrite or simplify it? Read the goal (proof_state) before "
+                 "reaching for another lemma; `rewrite -…` or `rewrite ?…` if the direction or presence varies",
+                 "already-simplified", "high", ["error: no subterm matching the rewrite"])
+

@@ -13,14 +13,10 @@ import argparse
 from pathlib import Path
 
 from pcp.cli.common import absolute
-from pcp.config.load import DEFAULT_CONFIG, EXAMPLE_CONFIG, load
+from pcp.config.load import DEFAULT_CONFIG, EXAMPLE_CONFIG, ensure_ignored, load
 from pcp.errors import UsageError
 from pcp.util.io import atomic_write_text, ensure_dir
 
-#: ``.pcp/.gitignore``: ignore the run state (graph, attempt directories, answer keys),
-#: keep the config -- it is per project and meant to be committed (credentials never live
-#: in it: :func:`pcp.config.load.load` rejects them).
-INNER_IGNORE = "# proof-copilot run state; the config is committed\n*\n!.gitignore\n!config.toml\n"
 _IGNORE_EQUIVALENTS = {".pcp", ".pcp/", "/.pcp", "/.pcp/", ".pcp/*", "/.pcp/*"}
 
 
@@ -30,15 +26,6 @@ def git_work_tree(start: Path) -> Path | None:
         if (candidate / ".git").exists():
             return candidate
     return None
-
-
-def ensure_ignored(pcp_dir: Path) -> bool:
-    """Write ``<project>/.pcp/.gitignore`` unless one exists; ``True`` if written."""
-    ignore = pcp_dir / ".gitignore"
-    if ignore.exists():
-        return False
-    atomic_write_text(ignore, INNER_IGNORE, follow_symlinks=True, keep_mode=True)
-    return True
 
 
 def config_hidden_by(project: Path) -> Path | None:

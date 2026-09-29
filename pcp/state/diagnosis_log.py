@@ -22,6 +22,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from pcp.config.load import state_dir
 from pcp.state.diagnose import Diagnosis
 from pcp.util.hashing import content_hash
 
@@ -36,8 +37,7 @@ def log_path(workspace: Path | str) -> Path:
 
 def _append(workspace: Path | str, record: dict[str, Any]) -> bool:
     try:
-        path = log_path(workspace)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path = state_dir(workspace) / LOG_NAME.name
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         return True

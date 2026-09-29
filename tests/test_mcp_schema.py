@@ -200,7 +200,9 @@ def test_a_file_in_another_project_gets_a_pool_rooted_there(tmp_path: Path) -> N
     sub = tmp_path / "theories" / "hazptr"
     sub.mkdir(parents=True)
     (sub / "x.v").write_text("Lemma t : True. Proof. exact I. Qed.\n", encoding="utf-8")
-    server = PcpServer(sub)
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-ws"
+    elsewhere.mkdir()
+    server = PcpServer(elsewhere)
     pool = server._pool_for(reflect=False, file=sub / "x.v")
     assert pool.workspace == tmp_path.resolve() and pool is not server.pool and pool.cfg["start_timeout"]
     assert server._pool_for(reflect=False, file=sub / "x.v") is pool  # one pool per root, lazily
@@ -212,7 +214,9 @@ def test_a_file_in_another_project_gets_a_pool_rooted_there(tmp_path: Path) -> N
     assert alone._pool_for(reflect=False, file=plain / "y.v") is alone.pool  # no project: the workspace
     rooted = PcpServer(tmp_path)
     assert rooted._pool_for(reflect=False, file=sub / "x.v") is rooted.pool  # the workspace is the project
-    for s in (server, alone, rooted):
+    inside = PcpServer(sub)  # launched below the project: the workspace is the project (session 3)
+    assert inside.workspace == tmp_path.resolve() and inside._pool_for(reflect=False, file=sub / "x.v") is inside.pool
+    for s in (server, alone, rooted, inside):
         s.close()
 
 

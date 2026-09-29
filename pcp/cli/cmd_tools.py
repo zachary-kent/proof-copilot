@@ -23,17 +23,17 @@ _PATH_ARGS = ("file", "plan")
 
 
 def workspace_of(args: argparse.Namespace) -> Path:
-    """``--workspace``, else the nearest ``_RocqProject``/``_CoqProject`` directory, else cwd."""
+    """The project ``--workspace`` (else cwd) names, as the MCP server picks it (:func:`workspace_for`)."""
     if getattr(args, "workspace", None) is not None:
         ws = absolute(args.workspace)
         assert ws is not None
         if not ws.is_dir():
             raise UsageError(f"--workspace {args.workspace}: no such directory")
-        return ws
-    from pcp.config.toolchain import project_root
+    else:
+        ws = Path(os.getcwd())
+    from pcp.config.toolchain import workspace_for
 
-    cwd = Path(os.getcwd())
-    return project_root(cwd) or cwd
+    return workspace_for(ws)
 
 
 def parse_call_args(raw_json: str | None, pairs: list[str] | None) -> dict[str, Any]:

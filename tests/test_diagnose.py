@@ -200,7 +200,8 @@ def test_failed_wp_tactic_names_the_actual_redex() -> None:
     assert "the WP's next redex is `! #l`: a load" in dx.text and "not what `wp_store` steps" in dx.text
     assert "there is no `l ↦ …` in the context" in dx.text
     not_wp = diagnose_structured("wp_load.", "wp_load: cannot find 'Load'", IrisGoal(goal="|={⊤}=> Φ #1"))
-    assert "is not a WP at its head" in not_wp.text
+    assert "no longer contains a WP" in not_wp.text and not_wp.repair == "already-simplified"
+    assert "`iModIntro`" in not_wp.text  # what to do with the `|={⊤}=>` the program step left
 
 
 def test_long_errors_keep_their_cause_at_the_tail() -> None:

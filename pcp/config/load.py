@@ -10,8 +10,35 @@ from pcp.config.flags import DEFAULT_FLAGS
 from pcp.config.providers import default_tiers
 from pcp.config.schema import Config, Provider, Tiers
 from pcp.errors import UsageError
+from pcp.util.io import atomic_write_text
 
 DEFAULT_CONFIG = Path(".pcp/config.toml")
+#: ``.pcp/.gitignore``: ignore the run state (graph, attempt directories, answer keys,
+#: diagnosis log, tool daemon), keep the config -- it is per project and meant to be
+#: committed (credentials never live in it: :func:`load` rejects them).
+INNER_IGNORE = "# proof-copilot run state; the config is committed\n*\n!.gitignore\n!config.toml\n"
+
+
+def ensure_ignored(pcp_dir: Path) -> bool:
+    """Write ``<project>/.pcp/.gitignore`` unless one exists; ``True`` if written."""
+    ignore = pcp_dir / ".gitignore"
+    if ignore.exists():
+        return False
+    atomic_write_text(ignore, INNER_IGNORE, follow_symlinks=True, keep_mode=True)
+    return True
+
+
+def state_dir(root: Path | str) -> Path:
+    """``<root>/.pcp``, created with its ``.gitignore`` -- every writer of run state goes
+    through here, so what pcp leaves behind never shows up as untracked cruft (session 3,
+    issue 26) whether or not ``pcp init`` ran."""
+    d = Path(root) / ".pcp"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        ensure_ignored(d)
+    except OSError:
+        pass  # a read-only tree: the caller's own write will say so
+    return d
 
 #: Keys that must never be read out of config into anything durable.
 SECRET_KEYS = ("api_key", "token", "secret", "password")

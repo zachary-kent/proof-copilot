@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pcp.config.load import state_dir
 from pcp.errors import PcpError, StateError
 from pcp.util.paths import tmpdir
 
@@ -178,6 +179,7 @@ class ToolDaemon:
         """Take the workspace lock.  Raises DaemonRunning when another daemon holds it."""
         if self._lock_fd is not None:
             return
+        state_dir(self.paths.workspace)
         _private_dir(self.paths.dir)
         fd = os.open(self.paths.lock, os.O_RDWR | os.O_CREAT, 0o600)
         try:
@@ -382,6 +384,7 @@ def ensure_daemon(
     if not lock_held(paths):
         from pcp.util.proc import spawn_detached
 
+        state_dir(paths.workspace)
         _private_dir(paths.dir)
         pid = spawn_detached(daemon_argv(paths, idle_s=idle_s, factory=factory), log=paths.log,
                              cwd=str(paths.workspace), env=env)

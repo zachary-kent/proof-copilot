@@ -5,6 +5,38 @@ All notable changes to proof-copilot. The format follows
 [Semantic Versioning](https://semver.org/). Install a release with
 `uv tool install --python 3.11 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@vX.Y.Z'`.
 
+## [0.4.1] - 2026-09-29
+
+Fixes from pcp-issues.md "Session 3" (a Cached-ME proof driven through the MCP plugin).
+
+### Fixed
+- The MCP server and the `pcp tools` daemon pick the same workspace: the pcp project at,
+  above or (one project, else the one with `.pcp/config.toml`) below the directory the host
+  started in. Claude Code passes the git root, so relative paths, the paths in answers and
+  `next`, and the run state used to belong to the git root instead of the project. Relative
+  paths also still resolve against the launch directory (issues 19, 24).
+- Every writer of run state creates `.pcp/.gitignore` (run state ignored, `config.toml`
+  tracked), so a stray `.pcp/` never shows up as untracked files (issue 26).
+- `proof_trace` answers are small: `events` keeps the last 5 steps' ledger events by default
+  (`events="all"|"none"`; `events_total` counts them all), warnings carry their step, and
+  `failure` no longer repeats the goal and error of the result block. A 35-sentence replay
+  dropped from roughly 60 KB to 2 KB (issue 20).
+- A multi-sentence `proof_step` runs sentence by sentence. A failure is reported for the
+  failing sentence against the goal it met, with a `chain` field saying how many sentences
+  ran and were committed (issue 23).
+
+### Added
+- Diagnoses for routine mistakes that used to come back `unknown` (issue 21):
+  `strip-later` (a hypothesis the tactic uses is under `▷`, including `▷` over a `match`
+  that must be destructed first), `beta-reduce` (a timeout against a goal with an unreduced
+  `(λ x, …) a`), and `already-simplified` (a `wp_*` on a goal with no WP left, or a
+  `rewrite` whose left-hand side the previous tactic already removed). A timed-out step
+  now surfaces a confident diagnosis in `next`, and the "no goal focused" diagnosis says
+  the previous tactic may already have discharged the side goal.
+- `proof_try` rows that fail but are near variants of a survivor carry `vs_survivor`:
+  the token difference and what it means (`/=` simplifies first, `"[H]"` is a spec
+  pattern, `//`, `$!`) (issue 22).
+
 ## [0.4.0] - 2026-09-28
 
 Using pcp on a project with its own Rocq/Iris (for example Rocq 9.2 and Iris dev in a

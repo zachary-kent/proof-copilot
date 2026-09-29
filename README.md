@@ -48,7 +48,7 @@ Codex (`codex`).
 ```bash
 # 1. pcp itself. Pick a tag from CHANGELOG.md; the [mcp] extra enables `pcp mcp` and --state-tools.
 #    --python 3.11: from a git URL uv does not pick an interpreter by requires-python (it fetches one if needed).
-uv tool install --python 3.11 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@v0.4.0'
+uv tool install --python 3.11 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@v0.4.1'
 
 # 2. A toolchain. A project with its own opam switch (`_opam`) needs none of this:
 #    pcp uses that switch, see "Using a project's own Rocq/Iris" below.

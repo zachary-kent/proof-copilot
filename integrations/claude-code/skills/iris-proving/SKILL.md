@@ -27,9 +27,12 @@ failure adds `error` (the cause is kept, even when cut), `timed_out`, or `lost`.
    is often a mistake. On failure read `diagnosis` (with `diagnosis_class` and
    `diagnosis_confidence`: a `low` one is a lead, not an answer) before retrying; if its
    class was wrong, `diagnosis_feedback(diagnosis_id, actual=...)`. `mode="speculative"`
-   does not move the session.
+   does not move the session. Several sentences in one call run one by one: a failure
+   names the failing one (`chain`) and the sentences before it stay committed. File
+   paths are relative to the pcp project, even when the host started in the git root.
 3. `proof_try(session, [t1, ..., t20])` -- when unsure between candidates, try them all
-   at once and keep a survivor. Cheap; use it instead of guessing serially.
+   at once and keep a survivor. Cheap; use it instead of guessing serially. A failed row
+   that is a near variant of a survivor says what differs (`vs_survivor`).
 4. `proof_state(session, select=..., budget=...)` -- the goal under a token budget,
    diff-only by default; `select` ("HP,H*,spatial,mentions:γ,head:WP") pins what you need.
 5. `proof_expect(session, "WP ! #(l +ₗ 1) {{ v, Φ v }}")` -- assert the goal's shape
@@ -52,7 +55,8 @@ failure adds `error` (the cause is kept, even when cut), `timed_out`, or `lost`.
   failure's `where` has the sentence and its line/column, `goal` the goal it met; the
   session sits right before it, so `proof_step` a replacement there. After editing the
   file, `proof_trace` again: only the sentences from the first changed one rerun
-  (`replayed_from`, `saved_ms`).
+  (`replayed_from`, `saved_ms`). `events` holds only the last steps' ledger events
+  (`events="all"` or `proof_ledger(session, "events")` for the whole log).
 - `unknown` from the ledger means it cannot tell. Treat it as no answer, not a hint.
 
 ## Patterns, names, notations
