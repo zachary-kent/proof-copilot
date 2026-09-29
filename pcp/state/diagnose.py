@@ -41,7 +41,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pcp.rocq.errors import shape_error
+from pcp.rocq.errors import is_timeout, shape_error
 from pcp.rocq.lexer import identifiers
 from pcp.state.ipm.model import IrisGoal
 from pcp.state.ipm.pattern import PatternSyntaxError, align, compile_auto
@@ -73,7 +73,7 @@ ERROR_CHARS = 1200
 RepairClass = Literal[
     "bullet", "rewrite-before-frame", "check-lemma-premise", "fix-pattern", "fix-intro-pattern",
     "missing-hypothesis", "fix-apply", "close-goal", "mask", "wp-next-step", "goal-shape",
-    "strip-later", "beta-reduce", "already-simplified", "unknown",
+    "strip-later", "beta-reduce", "already-simplified", "budget", "unknown",
 ]
 Confidence = Literal["high", "low"]
 
@@ -115,12 +115,18 @@ def diagnose(tactic: str, error: str, goal: IrisGoal | None = None, *, n_goals: 
     return diagnose_structured(tactic, error, goal, n_goals=n_goals).text
 
 
-def diagnose_structured(tactic: str, error: str, goal: IrisGoal | None = None, *, n_goals: int | None = None) -> Diagnosis:
+def diagnose_structured(tactic: str, error: str, goal: IrisGoal | None = None, *, n_goals: int | None = None,
+                        known_good: bool = False) -> Diagnosis:
     """:func:`diagnose` with its repair class, confidence and evidence.
 
     Every paragraph must be backed by something observed in the goal or the error;
     a generic suggestion that would fire on any failure of this tactic is omitted
     (the ledger's rule: say ``unknown`` -- here, say nothing -- rather than guess).
+
+    A timeout is evidence of a budget, not of a wrong tactic: it leads with a ``budget``
+    report (high confidence when ``known_good`` -- the same sentence, in the same place,
+    has passed before) and every other lead but a β-redex drops to low confidence
+    (session 4, issues 28, 29).
     """
     error = error or ""
     call = parse_tactic(tactic or "")
@@ -131,6 +137,10 @@ def diagnose_structured(tactic: str, error: str, goal: IrisGoal | None = None, *
     elif goal is not None:
         parts += _goal_parts(call, error, family, goal)
     parts = [p for p in parts if p.text]
+    if _timed_out(error):
+        parts = [p if p.repair == "beta-reduce" else dataclasses.replace(p, confidence="low") for p in parts]
+        if not any(p.repair == "beta-reduce" for p in parts):
+            parts.insert(0, _budget_part(known_good))
     lead = next((p for p in parts if p.repair != "unknown"), None)
     report = "\n\n".join(p.text for p in parts)
     text = "\n\n".join(t for t in (shape_error(error, ERROR_CHARS), report) if t)
@@ -587,14 +597,37 @@ def _wp_report(call: TacticCall, goal: IrisGoal, error: str) -> _Part:
     if red.kind == "heap" and red.loc:
         loc = red.loc.lstrip("#")
         if not any(_points_to(h.prop, loc) for h in goal.ipm_hyps):
-            confidence = "high"
-            line += f"; there is no `{loc} ↦ …` in the context"
+            # A step that ran out of time found something to work on: never a missing resource then.
+            if not _timed_out(error):
+                confidence = "high"
+                line += f"; there is no `{loc} ↦ …` in the context"
     return _Part(line, "wp-next-step", confidence, [f"next redex: {red.text} ({red.kind})"])
 
 
 def _points_to(prop: str, loc: str) -> bool:
-    words = " ".join(prop.split()).split(" ", 2)
-    return len(words) >= 2 and words[0] == loc and words[1].startswith("↦")
+    """Whether ``prop`` is a points-to for ``loc``: the same location, or one the printer
+    shows through a coercion (``Some (l +ₗ 1) &ₜ 0`` for ``l +ₗ 1``, issue 29).
+
+    The location is everything before the top-level ``↦``.  A coerced match must leave no
+    location arithmetic behind: ``l`` is not ``l +ₗ 1``.
+    """
+    flat = " ".join(prop.split())
+    cut = flat.find("↦")
+    if cut <= 0:
+        return False
+    mine, want = _unparen(flat[:cut].strip()), _unparen(" ".join(loc.split()))
+    if not mine:
+        return False
+    if mine == want:
+        return True
+    for inner, outer in ((mine, want), (want, mine)):
+        at = outer.find(inner)
+        if at < 0:
+            continue
+        rest = outer[:at] + outer[at + len(inner):]
+        if "+ₗ" not in rest and not re.search(r"[\w']$", outer[:at]) and not re.match(r"[\w']", outer[at + len(inner):]):
+            return True
+    return False
 
 
 def _one_line(text: str, width: int) -> str:
@@ -778,8 +811,19 @@ _NAME_SPLIT = re.compile(r"[\s\[\]$%#!>/*-]+")
 
 
 def _timed_out(error: str) -> bool:
-    low = _low(error)
-    return "timeout!" in low or "timed out" in low
+    return is_timeout(error)
+
+
+def _budget_part(known_good: bool) -> _Part:
+    if known_good:
+        return _Part("the sentence ran out of time, and the same sentence in the same place has passed before "
+                     "(the committed proof, or the last trace of this lemma): a budget problem, not a proof "
+                     "problem -- rerun with a larger `timeout`, or when the machine is less loaded (`timeout` "
+                     "in the result has the load)", "budget", "high", ["timed out", "known to pass"])
+    return _Part("the sentence ran out of time; that alone is not evidence the tactic is wrong (coqc has no "
+                 "per-sentence limit): rerun it with a larger `timeout` before changing the proof. If it still "
+                 "times out, look for what makes it slow: a large context for `set_solver`/`lia`/`done`, a "
+                 "β-redex or a stuck `match` blocking reduction", "budget", "low", ["timed out"])
 
 
 def _named_hyps(call: TacticCall) -> list[str]:

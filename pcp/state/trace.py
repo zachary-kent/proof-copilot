@@ -333,6 +333,12 @@ class Tracer:
         self.last_result: StepResult | None = None
         #: Wall time of ``petanque/start`` (ms); 0 when the root was adopted by :meth:`resume`.
         self.start_ms = 0
+        #: ``(step, tactic, result) -> budget``: when a sentence timed out, a larger budget
+        #: to run it once more at (``None``: do not).  A timeout on a loaded machine or on a
+        #: sentence known to pass is a budget artefact, not a proof failure (session 4, 28/33).
+        self.retry_budget: Callable[[int, str, StepResult], float | None] | None = None
+        #: Every retried sentence: ``{"step", "sentence", "first_s", "retry_s", "ok"}``.
+        self.retries: list[dict[str, Any]] = []
 
     @property
     def prev_goals(self) -> list[IrisGoal]:
@@ -406,6 +412,14 @@ class Tracer:
             self.start()
         self._n += 1
         result: StepResult = self.session.run(tactic, timeout=timeout)
+        if result.timed_out and self.retry_budget is not None:
+            larger = self.retry_budget(self._n, tactic, result)
+            if larger is not None and larger > result.budget_s:
+                first = result.budget_s
+                result = self.session.run(tactic, timeout=larger)
+                result.retried_from_s = first
+                self.retries.append({"step": self._n, "sentence": tactic, "first_s": first, "retry_s": larger,
+                                     "ok": result.ok})
         self.last_result = result
         self.trace.tactics.append(tactic)
         if not result.ok or result.state is None:
@@ -446,14 +460,18 @@ class Tracer:
         return step
 
     def run_script(
-        self, tactics: list[str], *, timeout: float | None = None, locations: list[SentenceAt] | None = None
+        self, tactics: list[str], *, timeout: float | None = None, locations: list[SentenceAt] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> Trace:
         """Step until the first failure; returns the trace either way.
 
         ``locations`` (from :func:`proof_script`) places the failing sentence in the
-        source file, so the failure says *where* as well as *what*.
+        source file, so the failure says *where* as well as *what*.  ``should_stop`` is
+        asked before each sentence: a replay superseded by a newer one stops there.
         """
         for i, tactic in enumerate(tactics):
+            if should_stop is not None and should_stop():
+                break
             if not self.step(tactic, timeout=timeout).ok:
                 if locations is not None and i < len(locations):
                     self.trace.failed_line = locations[i].line

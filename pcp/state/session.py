@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from pcp.errors import StateError
 from pcp.rocq.assemble import remove_twin, stubbed_twin
 from pcp.rocq.lexer import first_word, split_sentences
-from pcp.state.petanque import DEFAULT_STEP_TIMEOUT, GoalView, PetProcess, StateHandle, TacticError
+from pcp.state.petanque import DEFAULT_STEP_TIMEOUT, GoalStack, GoalView, PetProcess, StateHandle, TacticError
 
 if TYPE_CHECKING:
     from pcp.state.pool import SessionPool
@@ -74,6 +74,10 @@ class StepResult:
     #: The ``Set Typeclasses Debug`` trace of the re-run, when the step timed out.
     typeclass_debug: str | None = None
     tactic: str = ""
+    #: The per-sentence budget this run had (s), and the smaller one it first timed out
+    #: at when the tracer retried it (session 4, issues 28, 33).
+    budget_s: float = 0.0
+    retried_from_s: float | None = None
 
     @property
     def state_id(self) -> int | None:
@@ -244,7 +248,8 @@ class ProofSession:
             except TacticError as exc:
                 elapsed = int((time.perf_counter() - started) * 1000)
                 result = StepResult(
-                    ok=False, error=exc.message, elapsed_ms=elapsed, timed_out=exc.timed_out, tactic=tactic
+                    ok=False, error=exc.message, elapsed_ms=elapsed, timed_out=exc.timed_out, tactic=tactic,
+                    budget_s=limit,
                 )
                 if exc.timed_out:
                     result.typeclass_debug = self._typeclass_debug(proc, base, tactic, limit)
@@ -258,6 +263,7 @@ class ProofSession:
                 elapsed_ms=elapsed,
                 proof_finished=state.proof_finished,
                 tactic=tactic,
+                budget_s=limit,
             )
             h = state.state_hash
             if h is not None and h in self._seen:
@@ -270,11 +276,12 @@ class ProofSession:
                     self._seen.setdefault(h, len(self.history))
         return result
 
-    def try_many(self, tactics: list[str], *, from_state: StateHandle | None = None) -> list[StepResult]:
+    def try_many(self, tactics: list[str], *, from_state: StateHandle | None = None,
+                 timeout: float | None = None) -> list[StepResult]:
         """Speculative fan-out from one state (``proof_try``); nothing enters history."""
         with self._held():
             base = self._base(from_state)
-            return [self.run(t, from_state=base, commit=False) for t in tactics]
+            return [self.run(t, from_state=base, commit=False, timeout=timeout) for t in tactics]
 
     def _typeclass_debug(self, proc: PetProcess, base: StateHandle, tactic: str, limit: float) -> str | None:
         """Re-run a timed-out tactic under ``Set Typeclasses Debug`` and keep its trace.
@@ -299,6 +306,10 @@ class ProofSession:
     def goals(self, state: StateHandle | None = None) -> list[GoalView]:
         with self._held() as proc:
             return proc.goals(self._base(state))
+
+    def goal_stack(self, state: StateHandle | None = None) -> GoalStack:
+        with self._held() as proc:
+            return proc.goal_stack(self._base(state))
 
     def premises(self, state: StateHandle | None = None) -> Any:
         with self._held() as proc:

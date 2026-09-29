@@ -122,7 +122,7 @@ class _ChainTracer:
         self.ran: list[str] = []
         self.last_result = None
 
-    def step(self, tactic: str) -> Step:
+    def step(self, tactic: str, *, timeout: float | None = None) -> Step:
         self.ran.append(tactic)
         n = len(self.trace.steps)
         prev = self.trace.steps[-1].goals

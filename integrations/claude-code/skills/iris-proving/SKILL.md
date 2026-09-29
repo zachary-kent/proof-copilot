@@ -28,8 +28,14 @@ failure adds `error` (the cause is kept, even when cut), `timed_out`, or `lost`.
    `diagnosis_confidence`: a `low` one is a lead, not an answer) before retrying; if its
    class was wrong, `diagnosis_feedback(diagnosis_id, actual=...)`. `mode="speculative"`
    does not move the session. Several sentences in one call run one by one: a failure
-   names the failing one (`chain`) and the sentences before it stay committed. File
-   paths are relative to the pcp project, even when the host started in the git root.
+   names the failing one (`chain`) and the sentences before it stay committed. A failing
+   `t; [t1|...|tn]` or `t; first tac` says in `compound` whether the head failed or which
+   branch failed on which goal. File paths are relative to the pcp project, even when the
+   host started in the git root.
+   A timeout is a budget, not a verdict: `timeout` in the answer has the per-sentence budget,
+   the wall time and the machine's load. Rerun with `timeout=120` before changing a sentence
+   `coqc` accepts. When no goal is focused but the proof is not finished, `open_ends` says why
+   (a bullet sibling still open, shelved goals, an uninstantiated evar) and what `Qed` would say.
 3. `proof_try(session, [t1, ..., t20])` -- when unsure between candidates, try them all
    at once and keep a survivor. Cheap; use it instead of guessing serially. A failed row
    that is a near variant of a survivor says what differs (`vs_survivor`).
@@ -56,7 +62,9 @@ failure adds `error` (the cause is kept, even when cut), `timed_out`, or `lost`.
   session sits right before it, so `proof_step` a replacement there. After editing the
   file, `proof_trace` again: only the sentences from the first changed one rerun
   (`replayed_from`, `saved_ms`). `events` holds only the last steps' ledger events
-  (`events="all"` or `proof_ledger(session, "events")` for the whole log).
+  (`events="all"` or `proof_ledger(session, "events")` for the whole log). A long replay
+  answers `replaying: true` after `wait_s` (90 s) instead of timing out in the client; the
+  same call again waits for it.
 - `unknown` from the ledger means it cannot tell. Treat it as no answer, not a hint.
 
 ## Patterns, names, notations

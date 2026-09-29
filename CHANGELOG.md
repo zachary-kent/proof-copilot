@@ -5,6 +5,46 @@ All notable changes to proof-copilot. The format follows
 [Semantic Versioning](https://semver.org/). Install a release with
 `uv tool install --python 3.11 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@vX.Y.Z'`.
 
+## [0.4.2] - 2026-09-29
+
+Fixes from pcp-issues.md "Session 4" (a writable big atomic proved through the MCP plugin).
+
+### Fixed
+- Timeouts are reported as budgets, not proof failures (issues 28, 29, 33):
+  - A timed-out result carries `timeout`: the per-sentence budget, the wall time, the
+    machine's 1-minute load and core count, and whether the sentence is known to pass.
+  - `proof_step`, `proof_trace` and `proof_try` accept `timeout` (seconds per sentence).
+  - A timeout is retried once at twice the budget when the machine is busy (load ≥ 0.75
+    per core) or the sentence is known to pass (the same sentence after the same two
+    sentences is in the committed proof or passed in the last trace of the lemma).
+  - The diagnosis of a timeout is `budget` (high confidence when the sentence is known to
+    pass), and every other lead except a β-redex drops to low confidence. A timed-out
+    `wp_*` step no longer claims a points-to is missing.
+  - Rocq's `Anomaly "… Control.Timeout."` (from `lia` under `Timeout`) counts as a timeout.
+- The WP diagnosis finds a points-to for a multi-token location, and one the printer shows
+  through a coercion (`(l +ₗ 1) ↦ …` for `Some (l +ₗ 1) &ₜ 0`) (issue 29).
+- A failing `t; [t1|…|tn]`, `t; first tac`, `t; last tac` or `t; tac` is taken apart
+  (issues 30, 32). The head is rerun alone, then each tail tactic on its own goal, all
+  speculatively. `compound` says whether the head failed, a dispatch had the wrong number
+  of branches, or which branch failed on which goal. The diagnosis and `goal` are then
+  those of the failing part. A `first`/`last` tail that met the main goal says the side
+  goal was already solved.
+- A proof with no focused goal that is not finished says why, in `what` and in
+  `open_ends` (issue 31): unfocused goals under a bullet or brace, shelved or given-up
+  goals, or uninstantiated evars (named, with the step where each first shows). It also
+  gives what a speculative `Qed` says. "1 goal remain" now reads "1 goal remains".
+- `proof_trace` runs in the background. When it is still running after `wait_s` seconds
+  (default 90, below Claude Code's 120 s tool limit; `0` waits until done), it answers
+  `replaying: true` with its progress. The same call again waits for it and returns its
+  answer; a different script stops it at the next sentence. Other tools on the session
+  say it is still replaying instead of blocking (issue 28).
+- Smaller answers (issue 34):
+  - `diagnosis` is the report alone; the error is only in `error`, so an error that
+    carries a Rocq environment is no longer printed twice.
+  - A multi-sentence `proof_step`'s `ledger` keeps the last 5 steps' events
+    (`ledger_total` counts them all), with each event's detail and rewrite sites cut to
+    size.
+
 ## [0.4.1] - 2026-09-29
 
 Fixes from pcp-issues.md "Session 3" (a Cached-ME proof driven through the MCP plugin).

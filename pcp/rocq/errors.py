@@ -41,6 +41,18 @@ ENVIRONMENT_DUMP = re.compile(r"In environment\b.*?(?=" + COMPLAINT + ")", re.S)
 ELISION = " […] "
 
 
+#: How Rocq and petanque say a sentence ran out of time.  Under ``Timeout`` a tactic
+#: that cleans up in a ``Fun.protect`` finaliser (``lia``) surfaces as an anomaly
+#: instead of ``Timeout!`` (session 4, issue 33).
+_TIMEOUT_WORDS = ("timeout!", "timed out", "control.timeout")
+
+
+def is_timeout(text: str | None) -> bool:
+    """Whether a Rocq error (or a wall-clock message) says the sentence ran out of time."""
+    low = (text or "").lower()
+    return any(w in low for w in _TIMEOUT_WORDS)
+
+
 def collapse_environment(text: str) -> str:
     """Drop Rocq's ``In environment`` binder dump, keeping the complaint after it."""
     return ENVIRONMENT_DUMP.sub("In environment [...] ", text or "")

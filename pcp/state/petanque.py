@@ -42,7 +42,7 @@ from typing import Any
 from pcp.config import env as penv
 from pcp.config.toolchain import resolve as resolve_toolchain
 from pcp.errors import StateError, ToolchainError
-from pcp.rocq.errors import shape_error
+from pcp.rocq.errors import is_timeout, shape_error
 from pcp.rocq.lexer import first_word, split_sentences
 from pcp.util.io import atomic_write_text
 from pcp.util.proc import kill_tree
@@ -92,8 +92,7 @@ class TacticError(Exception):
 
     @property
     def timed_out(self) -> bool:
-        low = self.message.lower()
-        return "timeout!" in low or "timed out" in low
+        return is_timeout(self.message)
 
 
 @dataclass(frozen=True)
@@ -108,6 +107,20 @@ class GoalView:
 
     ty: str
     hyps: tuple[HypView, ...] = ()
+
+
+@dataclass(frozen=True)
+class GoalStack:
+    """Goal counts of one state: the focused ones and the ones a focused count hides."""
+
+    focused: int = 0
+    unfocused: int = 0
+    shelved: int = 0
+    given_up: int = 0
+
+    @property
+    def hidden(self) -> int:
+        return self.unfocused + self.shelved + self.given_up
 
 
 @dataclass(frozen=True)
@@ -570,6 +583,15 @@ class PetProcess:
             GoalView(ty=g.ty, hyps=tuple(HypView(names=tuple(h.names), ty=h.ty) for h in (g.hyps or [])))
             for g in raw
         ]
+
+    def goal_stack(self, state: StateHandle, *, timeout: float | None = None) -> GoalStack:
+        """What the focused goals do not show: goals under the bullet/brace stack, shelved, given up."""
+        raw = self.call("complete_goals", state, timeout=timeout)
+        if raw is None:
+            return GoalStack()
+        unfocused = sum(len(before) + len(after) for before, after in (raw.stack or []))
+        return GoalStack(focused=len(raw.goals or []), unfocused=unfocused, shelved=len(raw.shelf or []),
+                         given_up=len(raw.given_up or []))
 
     def premises(self, state: StateHandle, *, timeout: float | None = None) -> Any:
         return self.call("premises", state, timeout=timeout)
