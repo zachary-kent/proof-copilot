@@ -301,7 +301,7 @@ def test_a_long_replay_answers_before_the_client_gives_up(tmp_path: Path, monkey
     monkeypatch.setattr(server, "_trace", slow)
     first = server.proof_trace("x.v", "t", wait_s=0.05)
     assert first["ok"] is True and first["replaying"] is True and first["progress"] == {"steps": 1, "of": 1}
-    assert first["session"] == "s9" and 'proof_trace("x.v", "t") again waits' in first["next"][0]
+    assert first["session"] == "s9" and 'proof_trace("x.v", "t") again collects it' in first["next"][0]
     release.set()
     second = server.proof_trace("x.v", "t", wait_s=5)
     assert second["what"] == "replayed 1 sentence: proof finished" and calls == [1]  # joined, not rerun

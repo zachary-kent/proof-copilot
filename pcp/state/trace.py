@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pcp.errors import StateError
+from pcp.errors import StateError, WallClockExceeded
 from pcp.rocq.assemble import stub_proof_bodies
 from pcp.rocq.decls import find_block
 from pcp.rocq.errors import DEFAULT_PREFIX_TIMEOUT, PrefixCheck, check_prefix, shape_error
@@ -339,6 +339,11 @@ class Tracer:
         self.retry_budget: Callable[[int, str, StepResult], float | None] | None = None
         #: Every retried sentence: ``{"step", "sentence", "first_s", "retry_s", "ok"}``.
         self.retries: list[dict[str, Any]] = []
+        #: The sentence being run: ``(step, sentence, monotonic start)``, for a progress report.
+        self.running: tuple[int, str, float] | None = None
+        #: Set when a sentence ran past petanque's wall clock: the process, and every
+        #: state of this trace, is gone (see :meth:`_run`).
+        self.lost: str | None = None
 
     @property
     def prev_goals(self) -> list[IrisGoal]:
@@ -411,15 +416,19 @@ class Tracer:
         if not self.trace.steps:
             self.start()
         self._n += 1
-        result: StepResult = self.session.run(tactic, timeout=timeout)
-        if result.timed_out and self.retry_budget is not None:
-            larger = self.retry_budget(self._n, tactic, result)
-            if larger is not None and larger > result.budget_s:
-                first = result.budget_s
-                result = self.session.run(tactic, timeout=larger)
-                result.retried_from_s = first
-                self.retries.append({"step": self._n, "sentence": tactic, "first_s": first, "retry_s": larger,
-                                     "ok": result.ok})
+        self.running = (self._n, tactic, time.monotonic())
+        try:
+            result: StepResult = self._run(tactic, timeout)
+            if result.timed_out and self.retry_budget is not None and self.lost is None:
+                larger = self.retry_budget(self._n, tactic, result)
+                if larger is not None and larger > result.budget_s:
+                    first = result.budget_s
+                    result = self._run(tactic, larger)
+                    result.retried_from_s = first
+                    self.retries.append({"step": self._n, "sentence": tactic, "first_s": first, "retry_s": larger,
+                                         "ok": result.ok})
+        finally:
+            self.running = None
         self.last_result = result
         self.trace.tactics.append(tactic)
         if not result.ok or result.state is None:
@@ -458,6 +467,28 @@ class Tracer:
         if self.on_step is not None:
             self.on_step(step, prev)
         return step
+
+    def _run(self, tactic: str, timeout: float | None) -> StepResult:
+        """``session.run``, with a sentence that ran past petanque's wall clock as a timeout.
+
+        Rocq's ``Timeout`` does not stop every search (an ``iFrame`` through evars ran
+        past it, session 5, issues 40 and 42); the watchdog then kills the process.  The
+        session is gone either way, but the sentence that did it is known, so it is a
+        failed, timed-out step -- with its goal and a diagnosis -- not an anonymous
+        "session lost".  :attr:`lost` says the states are gone.
+        """
+        started = time.perf_counter()
+        try:
+            return self.session.run(tactic, timeout=timeout)
+        except WallClockExceeded as exc:
+            if exc.fn != "run":
+                raise
+            self.lost = str(exc)
+            limit = getattr(self.session, "step_timeout", 0.0) if timeout is None else timeout
+            return StepResult(ok=False, tactic=tactic, timed_out=True, budget_s=limit,
+                              elapsed_ms=int((time.perf_counter() - started) * 1000),
+                              error=f"Timeout! (Rocq's Timeout did not stop it: petanque was killed after its "
+                                    f"{exc.limit:g} s wall clock, and the session with it)")
 
     def run_script(
         self, tactics: list[str], *, timeout: float | None = None, locations: list[SentenceAt] | None = None,

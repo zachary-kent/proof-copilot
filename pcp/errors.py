@@ -48,6 +48,19 @@ class StateError(PcpError):
     """The petanque state layer lost or refused a session/state."""
 
 
+class WallClockExceeded(StateError):
+    """A petanque call ran past its Python-side wall clock and the process was killed.
+
+    Still a lost session, but one with a known cause: the call (``fn``) that ran away,
+    after ``limit`` seconds -- for ``run``, a sentence Rocq's own ``Timeout`` did not stop.
+    """
+
+    def __init__(self, message: str, *, fn: str = "", limit: float = 0.0) -> None:
+        super().__init__(message)
+        self.fn = fn
+        self.limit = limit
+
+
 class LockedError(PcpError):
     """Another ``pcp prove`` holds the run lock on this graph."""
 

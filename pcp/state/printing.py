@@ -152,3 +152,98 @@ def _flat(text: str) -> str:
 def _tidy(text: str) -> str:
     """``=@{ Z}`` (the notation's own spacing) as ``=@{Z}``; layout kept otherwise."""
     return _CARRIER.sub(lambda m: "=@{" + " ".join(m.group(1).split()) + "}", text).strip()
+
+
+# ------------------------------------------- atoms that print alike (session 5, issue 35)
+
+#: Words that end an application rather than being an argument of it.
+_STOP_WORDS = frozenset({"mod", "div", "then", "else", "in", "with", "end", "as", "return", "if", "match", "fun",
+                         "let", "forall", "exists", "at"})
+_OPEN, _CLOSE = "([{", ")]}"
+
+
+@dataclass(frozen=True)
+class AtomMismatch:
+    """One atom whose plain print hides several distinct terms."""
+
+    atom: str
+    #: ``(implicit print, [where it occurs])`` per distinct term, in order of appearance.
+    variants: tuple[tuple[str, tuple[str, ...]], ...]
+
+
+def _group_end(text: str, i: int) -> int:
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] in _OPEN:
+            depth += 1
+        elif text[j] in _CLOSE:
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return len(text)
+
+
+def _applications(text: str) -> list[tuple[str, str]]:
+    """``(head, application)`` for every identifier in ``text`` applied to its arguments.
+
+    An argument is an identifier, a numeral or a bracketed group; anything else (an
+    infix operator, a closing bracket, a keyword) ends the application.  ``@f`` counts
+    as ``f``, so the ``k``-th application of ``f`` in a plain print and in its
+    ``Set Printing Implicit`` reprint are the same subterm.
+    """
+    out: list[tuple[str, str]] = []
+    for m in _IDENT.finditer(text):
+        start = m.start()
+        if start and (text[start - 1].isalnum() or text[start - 1] in "_'."):
+            continue
+        head = m.group(0)
+        if head in _STOP_WORDS:
+            continue
+        begin = start - 1 if start and text[start - 1] == "@" else start
+        j = m.end()
+        while True:
+            k = j
+            while k < len(text) and text[k] == " ":
+                k += 1
+            if k < len(text) and text[k] in _OPEN:
+                j = _group_end(text, k)
+                continue
+            arg = _IDENT.match(text, k) or re.compile(r"\d+(?:%\w+)?").match(text, k)
+            if arg is None or arg.group(0) in _STOP_WORDS:
+                break
+            j = arg.end()
+        out.append((head, text[begin:j]))
+    return out
+
+
+def atom_mismatches(props: list[tuple[str, str, str]]) -> list[AtomMismatch]:
+    """Atoms that print the same in ``props`` but differ once implicit arguments are printed.
+
+    ``props`` is ``(where, plain print, implicit print)`` per hypothesis/goal.  The
+    ``k``-th application of each head in the plain print is paired with the ``k``-th
+    in the implicit one (heads whose counts differ are skipped); an atom whose plain
+    text maps to two implicit texts is reported.
+    """
+    seen: dict[str, dict[str, list[str]]] = {}
+    for where, plain, implicit in props:
+        plain, implicit = _flat(plain), _flat(implicit)
+        by_head: dict[str, list[str]] = {}
+        for head, app in _applications(implicit):
+            by_head.setdefault(head, []).append(app)
+        count = Counter(h for h, _ in _applications(plain))
+        taken: Counter[str] = Counter()
+        for head, app in _applications(plain):
+            twins = by_head.get(head, [])
+            if len(twins) != count[head] or app == head:
+                continue
+            variant = twins[taken[head]]
+            taken[head] += 1
+            if variant == app:
+                continue  # printed the same with implicit arguments: nothing hidden to compare
+            spots = seen.setdefault(app, {}).setdefault(variant, [])
+            if where not in spots:
+                spots.append(where)
+    found = [atom for atom, variants in seen.items() if len(variants) > 1]
+    # `pred (size fm)` differs only because `size fm` does: name the smallest atoms.
+    minimal = [a for a in found if not any(b != a and b in a for b in found)]
+    return [AtomMismatch(a, tuple((v, tuple(w)) for v, w in seen[a].items())) for a in minimal]

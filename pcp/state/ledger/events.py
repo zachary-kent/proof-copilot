@@ -41,12 +41,13 @@ EventKind = Literal[
     "Witness",
     "EvarInstantiated",
     "WpStop",
+    "CaseSplit",
     "Unknown",
 ]
 KINDS: tuple[str, ...] = (
     "Intro", "Consume", "Produce", "Split", "Rename", "Update", "Instantiate", "Frame", "Persist",
     "Specialize", "ModIntro", "MaskChange", "LaterIntro", "GoalSplit", "GoalClosed", "FractionSplit",
-    "GoalsCreated", "Focus", "Rewrite", "FrameClosed", "Witness", "EvarInstantiated", "WpStop", "Unknown",
+    "GoalsCreated", "Focus", "Rewrite", "FrameClosed", "Witness", "EvarInstantiated", "WpStop", "CaseSplit", "Unknown",
 )
 #: Events whose ``hyp`` is a *new* name (they carry ``targets``).
 PRODUCE_KINDS: frozenset[str] = frozenset({"Intro", "Produce", "Split", "Specialize", "Persist", "Rename"})
@@ -55,7 +56,7 @@ CONSUME_KINDS: frozenset[str] = frozenset({"Consume", "Frame"})
 #: Tactic-effect events (``effects.py``): what a step did to the goal.  Annotations, like
 #: ``FractionSplit``: the resource queries never read a fate off them.
 EFFECT_KINDS: frozenset[str] = frozenset(
-    {"GoalsCreated", "Focus", "Rewrite", "FrameClosed", "Witness", "EvarInstantiated", "WpStop"}
+    {"GoalsCreated", "Focus", "Rewrite", "FrameClosed", "Witness", "EvarInstantiated", "WpStop", "CaseSplit"}
 )
 
 #: Confidence is part of the record, not an afterthought (PLAN.md 4.4).
@@ -68,7 +69,7 @@ _PAST: dict[str, str] = {
     "MaskChange": "mask-changed", "LaterIntro": "later-stripped", "GoalSplit": "goal-split",
     "GoalClosed": "goal-closed", "FractionSplit": "fraction-split", "GoalsCreated": "created goals",
     "Focus": "refocused", "Rewrite": "rewrote", "FrameClosed": "framed", "Witness": "instantiated",
-    "EvarInstantiated": "instantiated", "WpStop": "stopped", "Unknown": "lost track of",
+    "EvarInstantiated": "instantiated", "WpStop": "stopped", "CaseSplit": "case-split", "Unknown": "lost track of",
 }
 
 

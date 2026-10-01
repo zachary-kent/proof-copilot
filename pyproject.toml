@@ -1,6 +1,6 @@
 [project]
 name = "proof-copilot"
-version = "0.4.2"
+version = "0.4.3"
 description = "Structured Iris proof state (pcp-state) and an obligation-graph orchestrator (pcp-orch) for Rocq"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -14,6 +14,9 @@ printed states around the step, so each becomes an event:
     Witness           an ``∃ x`` of the goal that is gone, and what ``x`` became
     EvarInstantiated  an evar ``?x`` that is gone, and what it became
     WpStop            the redex ``wp_pures`` stopped at, and why (``redex.py``)
+    CaseSplit         the ``bool_decide``/``decide`` a ``case_*`` tactic split on, and where it
+                      came from -- a warning when that was a hypothesis's while the goal has
+                      its own (session 5, issue 38)
 
 Same honesty rule as the resource ledger (PLAN.md 4.4): when the states do not say,
 the event says ``unknown`` (``confidence="unknown"``) rather than naming a guess.  The
@@ -23,6 +26,7 @@ them is re-derived, never re-run.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -30,7 +34,7 @@ from typing import Any
 
 from pcp.state.ipm.model import Hyp, IrisGoal
 from pcp.state.ipm.skeleton import parse_skeleton
-from pcp.state.ledger.diff import align_goals
+from pcp.state.ledger.diff import WARNING, align_goals
 from pcp.state.ledger.events import EFFECT_KINDS, Event
 from pcp.state.props import normalize_prop
 from pcp.state.redex import next_redex, wp_expr
@@ -49,6 +53,10 @@ _PEEL = frozenset({"later", "except0", "affinely", "absorbingly", "fupd", "bupd"
 #: Heap operations whose tactic needs the location's points-to in the context.
 _NEEDS_POINTSTO = ("wp_load", "wp_store", "wp_cmpxchg", "wp_xchg", "wp_faa", "wp_free")
 _SHAPE_WIDTH = 110
+#: stdpp's case splits on a decision: each takes the *first* match in the Coq goal, and
+#: the Iris context is part of that goal (hypotheses before the conclusion).
+CASE_HEADS: frozenset[str] = frozenset({"case_bool_decide", "case_decide", "case_guard"})
+_DECIDERS = {"case_bool_decide": "bool_decide", "case_decide": "decide", "case_guard": "decide"}
 
 
 def step_effects(prev_goals: Sequence[IrisGoal], next_goals: Sequence[IrisGoal], *, step: int, tactic: str) -> list[Event]:
@@ -102,6 +110,8 @@ def _effects(prev: list[IrisGoal], next_: list[IrisGoal], step: int, tactic: str
         out.append(_frame(ctx, parent, child, consumed, {**witness, **evenv}))
     if head in WP_PURE_HEADS:
         out.append(_wp_stop(ctx, parent, child))
+    if head in CASE_HEADS and len(children) > 1:
+        out += _case_split(ctx, parent, children)
     return out
 
 
@@ -492,3 +502,63 @@ def effect_lines(events: Sequence[Event]) -> list[str]:
                 line += "  [unknown]"
             out.append(line)
     return out
+
+
+# ---------------------------------------------------------------- case splits
+
+
+def _decisions(text: str, fn: str) -> list[str]:
+    """The propositions ``P`` of every ``fn P`` / ``fn (P)`` in ``text``, normalized."""
+    out: list[str] = []
+    flat = " ".join(text.split())
+    for m in re.finditer(rf"(?<![\w.']){re.escape(fn)}\s+", flat):
+        i = m.end()
+        if i < len(flat) and flat[i] == "(":
+            depth = 0
+            for j in range(i, len(flat)):
+                depth += flat[j] == "("
+                depth -= flat[j] == ")"
+                if depth == 0:
+                    out.append(unparen(flat[i:j + 1]).strip())
+                    break
+        else:
+            word = re.match(r"[\w'.]+", flat[i:])
+            if word:
+                out.append(word.group(0))
+    return out
+
+
+def _case_split(ctx: _Ctx, parent: IrisGoal, children: list[IrisGoal]) -> list[Event]:
+    """Which decision a ``case_bool_decide`` split on, and whether it was the goal's (issue 38).
+
+    stdpp's tactic splits on the first ``bool_decide`` in the whole Coq goal, and the
+    Iris context comes before the conclusion: right after ``wp_pures`` it can pick one
+    inside ``HΦ`` rather than the program's ``if``, and the follow-up tactics then fail
+    with messages that mention neither.
+    """
+    fn = _DECIDERS[ctx.call.head]
+    old = {h.id for h in parent.all_hyps}
+    fresh = [h for h in children[0].pure if h.id not in old]
+    if not fresh:
+        return []
+    prop = " ".join(fresh[0].prop.split())
+    prop = unparen(prop[1:].strip()) if prop.startswith("¬") else prop
+    key = _key(prop)
+    in_goal = [p for p in _decisions(parent.goal, fn)]
+    sources = [h.id for h in parent.all_hyps if any(_key(p) == key for p in _decisions(h.prop, fn))]
+    if any(_key(p) == key for p in in_goal) or not sources:
+        return [ctx.event("CaseSplit", children[0].goal_id, f"split on `{fn} ({_cut(prop)})`"
+                          + (" of the goal" if in_goal else ""), hyp=fresh[0].id, data={"prop": prop})]
+    if not in_goal:
+        return [ctx.event("CaseSplit", children[0].goal_id, f'split on `{fn} ({_cut(prop)})` from "{sources[0]}"',
+                          hyp=fresh[0].id, sources=sources[:1], data={"prop": prop, "from": sources[0]})]
+    other = in_goal[0]
+    detail = (f'{WARNING}{ctx.call.head} split on `{fn} ({_cut(prop)})` from "{sources[0]}", not on the goal\'s '
+              f"`{fn} ({_cut(other)})`: it takes the first `{fn}` anywhere, the Iris context included. To split on "
+              f"the goal's: `destruct_decide (bool_decide_reflect ({_cut(other)})) as {fresh[0].id}`"
+              if fn == "bool_decide" else
+              f'{WARNING}{ctx.call.head} split on `{fn} ({_cut(prop)})` from "{sources[0]}", not on the goal\'s '
+              f"`{fn} ({_cut(other)})`: it takes the first `{fn}` anywhere, the Iris context included. To split on "
+              f"the goal's: `destruct (decide ({_cut(other)})) as [{fresh[0].id}|{fresh[0].id}]`")
+    return [ctx.event("CaseSplit", children[0].goal_id, detail, hyp=fresh[0].id, sources=sources[:1],
+                      data={"prop": prop, "from": sources[0], "goal": other})]

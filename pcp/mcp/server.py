@@ -67,7 +67,7 @@ from pcp.rocq.lexer import split_sentences, terminate_sentence
 from pcp.state import budget as budgets
 from pcp.state.candidates import closest_survivor
 from pcp.state.compound import branch_command, split_compound
-from pcp.state.diagnose import diagnose_structured, error_family
+from pcp.state.diagnose import ARITH_HEADS, diagnose_structured, error_family
 from pcp.state.diagnosis_log import record_diagnosis, record_feedback
 from pcp.state.invariant import invariant_pattern
 from pcp.state.ipm.model import IrisGoal, Step
@@ -94,6 +94,7 @@ from pcp.state.render import Rendered, describe_goal_list, goal_list, goal_shape
 from pcp.state.search import notation_resolve, premise_search
 from pcp.state.session import ProofSession, StepResult
 from pcp.state.shape import expect_shape
+from pcp.state.tactic import parse_tactic
 from pcp.state.trace import ReplayCache, SentenceAt, Trace, Tracer, proof_script, replay_key
 from pcp.util.io import read_text
 from pcp.util.proc import kill_tree
@@ -562,7 +563,7 @@ class PcpServer:
         return out
 
     def _diagnosis(self, tactic: str, error: str | None, before: list[IrisGoal], *,
-                   known_good: bool = False) -> dict[str, Any]:
+                   known_good: bool = False, rec: SessionRecord | None = None, at: Step | None = None) -> dict[str, Any]:
         """Diagnosis by construction, against the goal the tactic was applied to, logged for tuning.
 
         ``n_goals`` lets a focusing failure say how many goals were focused ("2 goals
@@ -572,8 +573,13 @@ class PcpServer:
         carries a Rocq environment was printed twice (session 4, issue 34).
         """
         goal = before[0] if before else None
+        hidden = None
+        if rec is not None and at is not None and goal is not None and parse_tactic(tactic).head in ARITH_HEADS:
+            # What the printer hides, for atoms that print alike (session 5, issue 35).
+            shown = rec.tracer.hidden_at(at)
+            hidden = shown[0] if shown else None
         dx = diagnose_structured(tactic, error or "", goal, n_goals=len(before) if before else None,
-                                 known_good=known_good)
+                                 known_good=known_good, hidden=hidden)
         did = record_diagnosis(self.workspace, dx, goal_hash=goal.goal_hash if goal else "")
         lead = dx.report or f"no structural lead; the error says: {one_line(error or '', 200)}"
         return {"diagnosis": lead,
@@ -672,7 +678,8 @@ class PcpServer:
             goal = [r.text for r in self._render(rec, before[:1], prev=rec.seen_goals, at=at)] if before else None
         family = error_family(dx_error)
         known = self._known_good(rec.trace, rec.session, tactic) if timed_out else False
-        dx = self._diagnosis(dx_tactic, dx_error, dx_goals, known_good=known)
+        dx = self._diagnosis(dx_tactic, dx_error, dx_goals, known_good=known,
+                             rec=rec, at=at if part is None or part["part"] == "head" else None)
         confident = dx["diagnosis_confidence"] == "high" and dx["diagnosis_class"] != "unknown"
         if timed_out:
             what = f"`{one_line(tactic, 80)}` timed out" + (f" at step {n}" if n is not None else "")
@@ -684,6 +691,10 @@ class PcpServer:
                 hints.append("`typeclass_debug` has the instance search it was stuck in")
             if confident:
                 hints.insert(0, f"`diagnosis` names the likely cause ({dx['diagnosis_class']}, high confidence)")
+            if getattr(rec.tracer, "lost", None) is not None and not speculative:
+                hints = self._lost_hints(tactic, dx_class=dx["diagnosis_class"] if confident else None,
+                                         retry=f"proof_open({_q(self._rel(rec.session.source_file))}, "
+                                               f"{_q(rec.session.thm)}) and the steps up to here")
         else:
             what = f"`{one_line(tactic, 80)}` failed" + (f" at step {n}" if n is not None else "") + f": {one_line(error)}"
             hints = []
@@ -711,6 +722,7 @@ class PcpServer:
             what, shaped, where=where(file=self._rel(rec.session.source_file), sentence=tactic, step=n),
             goal=goal, next=hints, timed_out=timed_out, **dx,
         )
+        self._library_notes(out, rec, failed=True)
         if n is not None:
             out["step"] = n
         if timed_out:
@@ -922,6 +934,29 @@ class PcpServer:
         )
         if len(goals) > 1:
             out["goal_list"] = goal_list([], goals)
+        self._library_notes(out, rec)
+        return out
+
+    @staticmethod
+    def _library_notes(out: dict[str, Any], rec: SessionRecord, *, failed: bool = False) -> dict[str, Any]:
+        """Say when a worker was restarted for a rebuilt library, or a session still sees an old one (issue 37)."""
+        session = rec.session
+        refreshed = getattr(session, "refreshed", None)
+        if refreshed:
+            out["worker_restarted"] = refreshed
+            out["next"].append(f"petanque was restarted for this lemma: {refreshed}; sessions on the old process are closed")
+        pool = getattr(session, "pool", None)
+        changed = pool.changed_libraries(session) if pool is not None and hasattr(pool, "changed_libraries") else []
+        if changed:
+            names = ", ".join(p.name for p in changed[:3])
+            out["stale_libraries"] = [str(p) for p in changed]
+            note = (f"{names} {'was' if len(changed) == 1 else 'were'} rebuilt after this session's petanque process "
+                    "loaded it: this session still sees the old definitions -- proof_open (or proof_trace) again "
+                    "opens the lemma on a fresh process")
+            if failed:
+                out["next"].insert(0, note)
+            else:
+                out["next"].append(note)
         return out
 
     def _start_failure(self, exc: StartFailed, path: Path, lemma: str) -> dict[str, Any]:
@@ -997,6 +1032,16 @@ class PcpServer:
                                           timed_out=bool(last and last.timed_out) or is_timeout(step.error),
                                           typeclass_debug=last.typeclass_debug if last else None, run=last)
             return self._step_success(rec, tactic, before, step, select=select, budget=budget)
+
+    @staticmethod
+    def _lost_hints(sentence: str, *, dx_class: str | None, retry: str) -> list[str]:
+        """What to do after a sentence ran past petanque's wall clock and took the session with it (issue 42)."""
+        hints = [f"`{one_line(sentence, 60)}` ran past petanque's wall clock: Rocq's `Timeout` did not stop it, "
+                 "so the process was killed and this session's states are gone",
+                 f"do not rerun it as is: change the sentence first, then {retry}"]
+        if dx_class and dx_class not in ("unknown", "budget"):
+            hints.insert(1, f"`diagnosis` names what makes it run away ({dx_class})")
+        return hints
 
     def _step_chain(self, rec: SessionRecord, sentences: list[str], before: list[IrisGoal], *,
                     select: str | None, budget: int, timeout: float | None = None) -> dict[str, Any]:
@@ -1147,15 +1192,27 @@ class PcpServer:
             done = rec.trace.final.step if rec is not None and rec.trace.final is not None else 0
             total = len(job.tactics)
             sid = rec.id if rec is not None else None
-            call = f"proof_trace({_q(file)}, {_q(lemma)}" + ("" if job.own else ", <the same script>") + ")"
-            return result(
-                True, f"still replaying {lemma}: {done}/{total} sentences after {time.monotonic() - job.started:.0f} s"
-                + (f" (session {sid})" if sid else ""),
-                where=where(file=file, step=done), goal=None,
-                next=[f"{call} again waits for it and returns its answer (the replay keeps going meanwhile)",
-                      "a different script (an edit) stops this replay and starts from the first changed sentence"],
-                replaying=True, session=sid, progress={"steps": done, "of": total},
-            )
+            args = f"{_q(file)}, {_q(lemma)}" + ("" if job.own else ", <the same script>")
+            running = getattr(getattr(rec, "tracer", None), "running", None)
+            now = time.monotonic()
+            what = f"still replaying {lemma}: {done}/{total} sentences after {now - job.started:.0f} s" + (f" (session {sid})" if sid else "")
+            progress: dict[str, Any] = {"steps": done, "of": total}
+            if running is not None:
+                # Name the sentence it is on, so a slow one can be told from a slow replay (issue 42).
+                n, sentence, since = running
+                what += f"; now on step {n}, `{one_line(sentence, 60)}`, for {now - since:.0f} s"
+                progress.update(running={"step": n, "sentence": sentence, "for_s": round(now - since, 1)})
+            elif rec is None:
+                what += "; still opening the lemma"
+            hints = [f"proof_trace({args}) again collects it: the same call waits (up to `wait_s`) for this replay, "
+                     "never starts a second one -- the replay keeps going meanwhile",
+                     f"proof_trace({args}, wait_s=0) waits however long it takes",
+                     "a different script (an edit) stops this replay and starts from the first changed sentence"]
+            if running is not None and now - running[2] > budgets.step_budget(None):
+                hints.insert(0, f"step {running[0]} has run past the default per-sentence budget: if it is not "
+                             "expected to be slow, edit that sentence (the new script stops this replay)")
+            return result(True, what, where=where(file=file, step=done, sentence=running[1] if running else None),
+                          goal=None, next=hints, replaying=True, session=sid, progress=progress)
         with self._lock:
             if self._replays.get(job.key) is job:
                 del self._replays[job.key]
@@ -1197,7 +1254,10 @@ class PcpServer:
                 self.replays.drop(key)
                 self._drop(rec)
                 return self._trace(path, lemma, tactics, places, incremental=False, events=events, timeout=timeout, job=job)
-            self.replays.put(key, tracer.replay_entry())
+            if getattr(tracer, "lost", None) is None:
+                self.replays.put(key, tracer.replay_entry())
+            else:
+                self.replays.drop(key)  # its states died with the process
             return self._trace_result(rec, path, lemma, reused=reused, saved_ms=entry.saved_ms(k) if entry and reused is not None else 0,
                                       events=events)
 
@@ -1259,7 +1319,8 @@ class PcpServer:
             else:
                 met = [r.text for r in self._render(rec, failed.goals, diff_only=False, at=failed)]
             dx = (self._diagnosis(part["tactic"], part["error"], part["goals"]) if part is not None
-                  else self._diagnosis(failed.tactic, trace.error, list(failed.goals), known_good=known))
+                  else self._diagnosis(failed.tactic, trace.error, list(failed.goals), known_good=known,
+                                       rec=rec, at=failed))
             info["diagnosis"] = dx.pop("diagnosis")
             info.update(dx)
             info["timed_out"] = timed_out
@@ -1280,7 +1341,10 @@ class PcpServer:
             if part is not None:
                 what, hint = self._compound_what(failed.tactic, part, failed.step)
                 hints.insert(0, hint.replace("SID", _q(sid)))
-            if timed_out:
+            if timed_out and getattr(rec.tracer, "lost", None) is not None:
+                hints = self._lost_hints(failed.tactic, dx_class=info.get("diagnosis_class"),
+                                         retry=f"proof_trace({_q(file)}, {_q(lemma)}, script=[…])")
+            elif timed_out:
                 budget = info["timeout"]["budget_s"]
                 hints.insert(0, f"a timeout is not a wrong tactic: proof_trace({_q(file)}, {_q(lemma)}, "
                              f"timeout={int(min(budget * 4, budgets.MAX_TIMEOUT_S))}) reruns from here with a larger "
@@ -1297,6 +1361,7 @@ class PcpServer:
             )
             if len(failed.goals) > 1:
                 out["goal_shapes"] = [goal_shape(g) for g in failed.goals]
+            self._library_notes(out, rec, failed=True)
             self._events_hint(out, sid, events)
             return self._sections(out, SectionContext("proof_trace", rec, failed.tactic, list(failed.goals), None, failed, False,
                                                       list(trace.events)))
@@ -1319,6 +1384,7 @@ class PcpServer:
         if final is not None:
             rec.seen_step = final.step
         out = result(True, what + reuse, where=where(file=file, step=n), goal=goal, next=hints, **fields)
+        self._library_notes(out, rec)
         if len(goals) > 1:
             out["goal_list"] = goal_list([], goals)
         self._events_hint(out, sid, events)
@@ -1656,7 +1722,7 @@ def tool_functions(server: PcpServer) -> dict[str, Callable[..., str]]:
         """Render the goal at a step (default: current) under a token budget; it says what it elided.
 
         Diff-only by default: what changed since you last looked, plus a manifest of what did
-        not.  `select` (e.g. "HP,H*,spatial,mentions:γ,head:WP") always shows what it names,
+        not.  `select` (e.g. "HP,H*,spatial,mentions:γ,head:WP,goal") always shows what it names,
         with its implicit arguments; `mode` is full | folded | summary | hash-only.  Hidden
         coercions are spelled out (`↳ with coercions`) and equalities carry `[= at T]`."""
         return _dumps(server.proof_state(

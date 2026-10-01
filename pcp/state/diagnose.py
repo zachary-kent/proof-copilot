@@ -46,16 +46,23 @@ from pcp.rocq.lexer import identifiers
 from pcp.state.ipm.model import IrisGoal
 from pcp.state.ipm.pattern import PatternSyntaxError, align, compile_auto
 from pcp.state.ipm.skeleton import parse_skeleton
+from pcp.state.printing import GoalHidden, atom_mismatches
 from pcp.state.props import normalize_prop
 from pcp.state.redex import next_redex, wp_expr
 from pcp.state.search import tactics_for
 from pcp.state.tactic import TacticCall, Token, parse_tactic, term_head
+from pcp.state.terms import evars
 
 PATTERN_HEADS: frozenset[str] = frozenset({"iDestruct", "iMod", "iPoseProof", "iCombine", "iInv", "iDestructHyp", "iSpecialize"})
 INTRO_HEADS: frozenset[str] = frozenset({"iIntros", "iIntro"})
 APPLY_HEADS: frozenset[str] = frozenset({"iApply", "wp_apply"})
 CLOSING_HEADS: frozenset[str] = frozenset({"iFrame", "done", "iExact", "iAssumption", "by", "iExFalso", "iPureIntro", "eauto", "auto"})
 MASK_HEADS: frozenset[str] = frozenset({"iInv"})
+#: Decision procedures that work on atoms: two atoms that print alike but differ in a
+#: hidden implicit argument are two unknowns to them (session 5, issue 35).
+ARITH_HEADS: frozenset[str] = frozenset({"lia", "nia", "lra", "nra", "ring", "field", "omega", "psatz", "ring_simplify"})
+#: Leads that explain a timeout by the goal's structure, not the budget.
+_STRUCTURAL_SLOWNESS: frozenset[str] = frozenset({"beta-reduce", "split-before-frame"})
 _TRANSPARENT = frozenset({"later", "except0", "affinely", "absorbingly", "affine", "absorb"})
 _BOX = frozenset({"box", "intuitionistically", "persistently", "plainly", "pers"})
 _UPDATE = frozenset({"fupd", "fupd_step", "bupd"})
@@ -73,7 +80,8 @@ ERROR_CHARS = 1200
 RepairClass = Literal[
     "bullet", "rewrite-before-frame", "check-lemma-premise", "fix-pattern", "fix-intro-pattern",
     "missing-hypothesis", "fix-apply", "close-goal", "mask", "wp-next-step", "goal-shape",
-    "strip-later", "beta-reduce", "already-simplified", "budget", "unknown",
+    "strip-later", "beta-reduce", "already-simplified", "budget", "finish-block", "split-before-frame",
+    "give-predicate", "implicit-mismatch", "unknown",
 ]
 Confidence = Literal["high", "low"]
 
@@ -116,7 +124,7 @@ def diagnose(tactic: str, error: str, goal: IrisGoal | None = None, *, n_goals: 
 
 
 def diagnose_structured(tactic: str, error: str, goal: IrisGoal | None = None, *, n_goals: int | None = None,
-                        known_good: bool = False) -> Diagnosis:
+                        known_good: bool = False, hidden: GoalHidden | None = None) -> Diagnosis:
     """:func:`diagnose` with its repair class, confidence and evidence.
 
     Every paragraph must be backed by something observed in the goal or the error;
@@ -126,7 +134,13 @@ def diagnose_structured(tactic: str, error: str, goal: IrisGoal | None = None, *
     A timeout is evidence of a budget, not of a wrong tactic: it leads with a ``budget``
     report (high confidence when ``known_good`` -- the same sentence, in the same place,
     has passed before) and every other lead but a β-redex drops to low confidence
-    (session 4, issues 28, 29).
+    (session 4, issues 28, 29).  A structural cause of the slowness -- a β-redex, an
+    ``iFrame`` searching through evars (session 5, issue 40) -- keeps its confidence and
+    leads the budget report, which then follows it.
+
+    ``hidden`` is what the printer hides in ``goal`` (``pcp.state.printing``): with it,
+    an arithmetic tactic that failed on atoms which print alike but differ in their
+    implicit arguments says so (session 5, issue 35).
     """
     error = error or ""
     call = parse_tactic(tactic or "")
@@ -135,12 +149,16 @@ def diagnose_structured(tactic: str, error: str, goal: IrisGoal | None = None, *
     if family == "focus":
         parts.append(_focus_report(error, n_goals))
     elif goal is not None:
+        if call.head in ARITH_HEADS and hidden is not None:
+            parts.append(_implicit_report(goal, hidden))
         parts += _goal_parts(call, error, family, goal)
     parts = [p for p in parts if p.text]
     if _timed_out(error):
-        parts = [p if p.repair == "beta-reduce" else dataclasses.replace(p, confidence="low") for p in parts]
+        parts = [p if p.repair in _STRUCTURAL_SLOWNESS and p.confidence == "high" else dataclasses.replace(p, confidence="low")
+                 for p in parts]
         if not any(p.repair == "beta-reduce" for p in parts):
-            parts.insert(0, _budget_part(known_good))
+            after = 1 if parts and parts[0].repair in _STRUCTURAL_SLOWNESS else 0
+            parts.insert(after, _budget_part(known_good))
     lead = next((p for p in parts if p.repair != "unknown"), None)
     report = "\n\n".join(p.text for p in parts)
     text = "\n\n".join(t for t in (shape_error(error, ERROR_CHARS), report) if t)
@@ -160,6 +178,9 @@ def _goal_parts(call: TacticCall, error: str, family: str, goal: IrisGoal) -> li
     # the goal, not the tactic's family, so they lead when they fire.
     if _timed_out(error):
         parts.append(_beta_report(call, goal))
+        parts.append(_frame_search_report(call, goal))
+        parts = [p for p in parts if p.text]
+    parts.append(_applied_evar_report(error))
     parts.append(_later_report(call, goal, error))
     if call.head.startswith("rewrite") or call.head == "erewrite":
         parts.append(_rewrite_report(call, goal, error))
@@ -173,7 +194,9 @@ def _goal_parts(call: TacticCall, error: str, family: str, goal: IrisGoal) -> li
         parts.append(_closing_report(goal, error))
     elif call.head.startswith("wp_"):
         parts.append(_wp_report(call, goal, error))
-    if _mentions_mask(error):
+    if _mentions_mask(error) and not any(p.repair == "give-predicate" for p in parts):
+        # A unification error quotes the terms it could not unify, masks and all; an
+        # applied evar is the cause there, not the mask (session 5, issue 41).
         parts.append(_mask_report(goal))
     if not any(p.text for p in parts) and _misfit_error(error):
         # The error says the tactic does not fit the goal: only then is the goal's own
@@ -680,10 +703,22 @@ def _focus_report(error: str, n_goals: int | None) -> _Part:
         return _Part(f"bullet mismatch: the current goal is not finished, or the next goal expects the bullet{want}. "
                      "Close the current goal before the next bullet, and keep one bullet symbol per nesting level.",
                      "bullet", "high", ["error: bullet mismatch"])
+    if "cannot be unfocused this way" in low and n:
+        # `}` with goals still open inside the block: the opposite of "nothing is focused"
+        # (session 5, issue 36).
+        return _Part(f"the `{{ }}` block is not finished: {n} goal{'s are' if n != 1 else ' is'} still open inside it "
+                     "(`goal` shows the first), and `}` only closes a block whose goals are all proved -- finish "
+                     "it before the `}`, e.g. with the tactic that proves the goal shown",
+                     "finish-block", "high", [f"{n} goal(s) focused at the `}}`"])
+    if n:
+        return _Part(f"a focusing command failed with {n} goal{'s' if n != 1 else ''} focused: the bullet or brace "
+                     "structure does not match the goals (a bullet or `}` too many or too few); compare the "
+                     "script's nesting with the goals the previous tactics made (`goal_list`)",
+                     "bullet", "low", ["error: focusing", f"{n} goal(s) focused"])
     return _Part("no goal is focused here: the previous bullet or `{ }` block already closed its goal, or the "
                  "previous tactic already discharged this side goal (`//`, `by`, a `wp_*` that solved a pure side "
                  "condition) -- drop the sentence, or use the next bullet (or `}`) to move to the remaining goals.",
-                 "bullet", "high", ["error: no focused goal"])
+                 "bullet", "high" if n == 0 else "low", ["error: no focused goal"])
 
 
 # -------------------------------------------------------------------- framing
@@ -934,3 +969,91 @@ def _rewrite_report(call: TacticCall, goal: IrisGoal, error: str) -> _Part:
                  "reaching for another lemma; `rewrite -…` or `rewrite ?…` if the direction or presence varies",
                  "already-simplified", "high", ["error: no subterm matching the rewrite"])
 
+
+
+# ------------------------------------------------------ session 5 (issues 35, 40, 41)
+
+_EVAR_HEAD = re.compile(r"^\(?\s*(\?[A-Za-z_][\w']*)\s+(\S.*?)\)?$", re.S)
+_UNABLE = re.compile(r"(?:unable to|impossible to|cannot|could not) unify\s+\"(.*?)\"\s+(?:with|and)\s+\"(.*?)\"",
+                     re.I | re.S)
+
+
+def _applied_evar_report(error: str) -> _Part:
+    """``Unable to unify "?P x y" with "…"``: higher-order unification will not invent ``?P``.
+
+    The quoted terms may mention masks, laters, anything; the cause is that an evar is
+    applied to arguments, and the fix is to give it (issue 41).
+    """
+    m = _UNABLE.search(error or "")
+    if m is None:
+        return _Part("")
+    for side, other in ((m.group(1), m.group(2)), (m.group(2), m.group(1))):
+        e = _EVAR_HEAD.match(" ".join(side.split()))
+        if e is None:
+            continue
+        evar, args = e.group(1), e.group(2).strip()
+        return _Part(f"higher-order unification: the evar `{evar}` is applied to arguments (`{_one_line(args, 60)}`), and "
+                     f"Rocq will not invent a function for it to match `{_one_line(' '.join(other.split()), 80)}`. "
+                     "Give that argument of the lemma explicitly -- the predicate, as a `λ` over those arguments "
+                     f"(`(lemma … (λ …, {_one_line(' '.join(other.split()), 40)}) …)`, or `(P := λ …, …)`)",
+                     "give-predicate", "high", [f"error: cannot unify applied evar {evar} {_one_line(args, 40)}"])
+    return _Part("")
+
+
+#: Identifiers that are not definitions iFrame could unfold (logic and heap_lang syntax).
+_NOT_DEFS = frozenset({"True", "False", "emp", "WP", "own", "inv", "∃", "∀", "λ", "Some", "None", "S", "O"})
+
+
+def _frame_search_report(call: TacticCall, goal: IrisGoal) -> _Part:
+    """A timed-out ``iFrame``: what makes its search blow up (issue 40).
+
+    ``iFrame`` tries every hypothesis against every goal conjunct, and on a conjunct
+    headed by an evar (after ``iApply "HΦ"`` on a ``∀`` continuation) or by a definition
+    no hypothesis has (which instance search unfolds, existentials and all), that search
+    has no bound worth waiting for.  The fix is structural, not a larger budget.
+    """
+    if not call.mentions("iFrame"):
+        return _Part("")
+    found = evars(goal.goal)
+    conjuncts = _conjunct_texts(parse_skeleton(goal.goal))
+    hyp_heads = {term_head(" ".join(h.prop.split())) for h in goal.ipm_hyps}
+    defs = []
+    for c in conjuncts:
+        head = term_head(" ".join(c.split()))
+        if head and head[0].isalpha() and head not in _NOT_DEFS and head not in hyp_heads and head not in defs:
+            defs.append(head)
+    if not found and not defs:
+        return _Part("")
+    lines = []
+    if found:
+        lines.append(f"the goal has evars ({', '.join(found[:4])}): `iFrame` tries to instantiate them against every "
+                     "hypothesis, which is where the time goes. Instantiate them first -- `iApply (\"HΦ\" $! x)` instead "
+                     "of `iApply \"HΦ\"`, or `iExists x` -- then frame")
+    if defs:
+        lines.append(f"no hypothesis is headed by {', '.join(f'`{d}`' for d in defs[:3])}: `iFrame` unfolds "
+                     f"{'it' if len(defs) == 1 else 'them'} and searches under the existentials inside. Split first "
+                     "(`iSplitR \"H…\"` / `iSplitL`, then frame each side by name), or prove that part with "
+                     "`iExists …` / its own lemma")
+    return _Part("\n".join(lines), "split-before-frame", "high" if found else "low",
+                 [f"evars in goal: {', '.join(found[:4])}"] if found else [f"no hypothesis headed by {', '.join(defs[:3])}"])
+
+
+def _implicit_report(goal: IrisGoal, hidden: GoalHidden) -> _Part:
+    """Atoms that print alike but differ in implicit arguments: two unknowns to ``lia`` (issue 35)."""
+    g = hidden.goal
+    props = [("the goal", goal.goal, (g.implicit or g.explicit or goal.goal) if g is not None else goal.goal)]
+    for h in goal.all_hyps:
+        d = hidden.get(h)
+        props.append((f'"{h.id}"', h.prop, (d.implicit or d.explicit or h.prop) if d is not None else h.prop))
+    found = atom_mismatches(props)
+    if not found:
+        return _Part("")
+    lines = []
+    for m in found[:3]:
+        where_ = "; ".join(f"`{_one_line(v, 90)}` ({', '.join(ws[:3])})" for v, ws in m.variants[:3])
+        lines.append(f"`{m.atom}` prints the same everywhere but is {len(m.variants)} different terms: {where_}")
+    lines.append("a decision procedure treats them as different unknowns. They are usually convertible: make them "
+                 "syntactically equal first (`change`, `rewrite` with the lemma that produced one of them, or "
+                 "`simpl`/`unfold` the instance), or prove the step by conversion (`reflexivity`, `f_equal`)")
+    return _Part("\n".join(lines), "implicit-mismatch", "high",
+                 [f"{m.atom}: {len(m.variants)} implicit variants" for m in found[:3]])

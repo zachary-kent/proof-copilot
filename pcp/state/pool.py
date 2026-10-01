@@ -10,6 +10,11 @@ process that elaborates its file (file affinity: coq-lsp caches the checked docu
 Health is checked only *between* calls; a restart bumps the process generation and
 marks every session bound to it as lost, so the next call on such a session fails with
 a clear ``StateError`` instead of a stale id being reused.
+
+A process also goes stale when a project library it loaded is rebuilt: it keeps the
+old ``.vo`` (``pcp.rocq.deps``, session 5, issue 37).  New sessions never land on a
+stale process; when the pool is full, the least-loaded stale one is restarted, and its
+sessions are told why.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from pcp.errors import StateError
+from pcp.rocq import deps
 from pcp.state.petanque import DEFAULT_STEP_TIMEOUT, PetProcess
 from pcp.state.session import ProofSession
 
@@ -48,7 +54,13 @@ class SessionPool:
         self._sessions: dict[int, list[weakref.ReferenceType[ProofSession]]] = {}
         #: Every session opened here, so ``close`` releases their twins.
         self._opened: weakref.WeakSet[ProofSession] = weakref.WeakSet()
+        #: Per process id: the project ``.vo`` files its sessions loaded, with the mtime
+        #: each had when it was loaded.
+        self._libraries: dict[int, dict[Path, float | None]] = {}
         self._closed = False
+        #: Per process id: why it was last restarted for stale libraries, until the open
+        #: that caused it has picked the reason up (``ProofSession.refreshed``).
+        self._refreshed: dict[int, str] = {}
 
     # -- processes -------------------------------------------------------------
     @property
@@ -72,12 +84,60 @@ class SessionPool:
             raise StateError("the petanque pool is closed")
         key = str(Path(file).resolve())
         with self._lock:
-            warm = [p for p in self._processes if key in p.files and p.alive()]
+            stale = {p.id: changed for p in self._processes if (changed := self._changed(p.id))}
+            fresh = [p for p in self._processes if p.id not in stale]
+            warm = [p for p in fresh if key in p.files and p.alive()]
             if warm:
                 return min(warm, key=self._load)
             if len(self._processes) < self.size:
                 return self._spawn()
-            return min(self._processes, key=self._load)
+            if fresh:
+                return min(fresh, key=self._load)
+            victim = min(self._processes, key=self._load)
+        self.refresh(victim, stale[victim.id])
+        return victim
+
+    def _changed(self, pid: int) -> list[Path]:
+        """The libraries process ``pid`` loaded that changed on disk since."""
+        return [path for path, when in self._libraries.get(pid, {}).items() if deps.mtime(path) != when]
+
+    def changed_libraries(self, session: ProofSession) -> list[Path]:
+        """The libraries ``session``'s file loads that were rebuilt after its process loaded them."""
+        process = session.process
+        if process is None:
+            return []
+        seen = self._libraries.get(process.id, {})
+        mine = getattr(session, "libraries", None) or []
+        return [path for path in mine if path in seen and deps.mtime(path) != seen[path]]
+
+    def refresh(self, process: PetProcess, changed: list[Path]) -> None:
+        """Restart ``process`` because libraries it loaded were rebuilt; its sessions are lost, saying so."""
+        names = ", ".join(p.name for p in changed[:3]) + (f" and {len(changed) - 3} more" if len(changed) > 3 else "")
+        reason = f"{names} changed on disk after this petanque process loaded {'it' if len(changed) == 1 else 'them'}"
+        with process.lock:
+            process.restart(reason)
+            self._libraries[process.id] = {}
+            for ref in self._sessions.get(process.id, []):
+                session = ref()
+                if session is not None and session.started:
+                    session.mark_lost(f"petanque restarted ({reason})")
+            self._sessions[process.id] = [r for r in self._sessions.get(process.id, []) if (x := r()) is not None and not x.started]
+            self._refreshed[process.id] = reason
+
+    def note_libraries(self, session: ProofSession, file: str | Path) -> None:
+        """Record the project libraries ``file`` loads against ``session``'s process."""
+        process = session.process
+        if process is None:
+            return
+        try:
+            files = deps.library_files(file)
+        except Exception:  # noqa: BLE001 -- staleness tracking never costs the open
+            return
+        session.libraries = files  # type: ignore[attr-defined]
+        with self._lock:
+            table = self._libraries.setdefault(process.id, {})
+            for path in files:
+                table.setdefault(path, deps.mtime(path))
 
     def _load(self, proc: PetProcess) -> int:
         return sum(1 for ref in self._sessions.get(proc.id, []) if ref() is not None)
@@ -114,6 +174,7 @@ class SessionPool:
                 return False
             reason = process.dead_reason or f"RSS {process.rss_mb()} MB exceeded the {process.rss_cap_mb} MB cap"
             process.restart(reason)
+            self._libraries[process.id] = {}
             # A session that has not started holds no state ids, so it cannot go
             # stale: it is the open that triggered this restart (after a killed
             # `start`, the next open lands on the dead process) and stays registered.
@@ -167,6 +228,8 @@ class SessionPool:
         self._opened.add(session)
         session.bind(process)
         self.register(session)
+        session.refreshed = self._refreshed.pop(process.id, None)  # type: ignore[attr-defined]
+        self.note_libraries(session, file)
         if start:
             session.start()
         return session

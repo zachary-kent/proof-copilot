@@ -5,6 +5,43 @@ All notable changes to proof-copilot. The format follows
 [Semantic Versioning](https://semver.org/). Install a release with
 `uv tool install --python 3.11 'proof-copilot[mcp] @ git+https://github.com/zachary-kent/proof-copilot@vX.Y.Z'`.
 
+## [0.4.3] - 2026-10-01
+
+Fixes from pcp-issues.md "Session 5" (space credits for Cached-WaitFree, through the MCP
+plugin and `pcp tools call`).
+
+### Fixed
+- A worker no longer keeps a stale library after `make` rebuilds it (issue 37). The pool
+  records the project `.vo` files each process loaded (the opened files' `Require`s,
+  transitively, through the `-Q`/`-R` mappings) with their mtimes. A new session never
+  lands on a process whose libraries changed; when the pool is full, the least-loaded
+  such process is restarted, its sessions are marked lost with the reason, and the
+  answer carries `worker_restarted`. An older session whose own libraries were rebuilt
+  says so (`stale_libraries`) in its failures and trace answers.
+- A sentence that runs past petanque's wall clock (Rocq's `Timeout` did not stop it) is a
+  timed-out failure of that sentence, with its goal and diagnosis, instead of an
+  anonymous "session lost"; the answer says the session is gone and not to rerun the
+  sentence unchanged, and the replay cache drops the dead states (issue 42).
+- An early `proof_trace` answer names the step and sentence it is on and for how long,
+  says the same call collects the result (`wait_s=0` waits until done), and flags a
+  sentence past the default per-sentence budget (issue 42).
+- A timed-out `iFrame` whose goal has evars, or conjuncts headed by a definition no
+  hypothesis has, is diagnosed `split-before-frame` (instantiate or split first) ahead
+  of the budget report; high confidence with evars (issue 40).
+- `Unable to unify "?P x y" with …` is diagnosed `give-predicate` (give the predicate
+  explicitly), and no longer as a mask problem because the quoted terms mention masks
+  (issue 41).
+- `}` on a block with goals still open is diagnosed `finish-block`, not "no goal is
+  focused"; the "no goal is focused" reading is high confidence only when no goal was
+  focused (issue 36).
+- A failed `lia`/`nia`/`ring`/… reprints the state with implicit arguments and names atoms
+  that print alike but are different terms (`implicit-mismatch`, e.g. two `size fm` with
+  different `Size` instances) (issue 35). `select` naming `goal` now shows the goal's
+  implicit arguments too.
+- `case_bool_decide`/`case_decide` that split on a decision from a hypothesis while the
+  goal has its own warns, and gives the `destruct_decide (bool_decide_reflect (…))` that
+  splits on the goal's (a new `CaseSplit` effect) (issue 38).
+
 ## [0.4.2] - 2026-09-29
 
 Fixes from pcp-issues.md "Session 4" (a writable big atomic proved through the MCP plugin).

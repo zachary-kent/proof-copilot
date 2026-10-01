@@ -41,7 +41,7 @@ from typing import Any
 
 from pcp.config import env as penv
 from pcp.config.toolchain import resolve as resolve_toolchain
-from pcp.errors import StateError, ToolchainError
+from pcp.errors import StateError, ToolchainError, WallClockExceeded
 from pcp.rocq.errors import is_timeout, shape_error
 from pcp.rocq.lexer import first_word, split_sentences
 from pcp.util.io import atomic_write_text
@@ -278,6 +278,7 @@ class PetProcess:
         self._port = 0
         self._dead_reason: str | None = None
         self._watchdog_fired: str | None = None
+        self._watchdog_limit = 0.0
         self._tail: deque[str] = deque(maxlen=200)
 
     # -- lifecycle -------------------------------------------------------------
@@ -493,6 +494,7 @@ class PetProcess:
     def _on_timeout(self, generation: int, fn: str, limit: float) -> None:
         if generation != self.generation:
             return
+        self._watchdog_limit = limit
         self._watchdog_fired = (
             f"petanque call `{fn}` exceeded its {limit:g} s wall clock; the process was killed and "
             "every state it held is gone -- call proof_open again"
@@ -501,7 +503,7 @@ class PetProcess:
 
     def _translate(self, exc: Exception, fn: str) -> Exception:
         if self._watchdog_fired:
-            return StateError(self._watchdog_fired)
+            return WallClockExceeded(self._watchdog_fired, fn=fn, limit=self._watchdog_limit)
         code = getattr(exc, "code", None)
         message = getattr(exc, "message", None)
         text = message if isinstance(message, str) and message else f"{type(exc).__name__}: {exc}"

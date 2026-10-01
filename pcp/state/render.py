@@ -93,7 +93,9 @@ def render_goal(
     carrier = _carrier_bit(goal_hidden)
     goal_line += f"   [{carrier}]" if carrier else ""
     if mode in ("full", "folded"):
-        goal_line += _hidden_lines(goal_hidden, explicit=False)
+        # `select="goal"` asks for the conclusion as explicitly as a named hypothesis
+        # (session 5, issue 35: the goal's implicit arguments were never shown).
+        goal_line += _hidden_lines(goal_hidden, explicit="goal" in sel.globs)
     spent = estimate_tokens(header) + estimate_tokens(goal_line)
 
     relevant = _relevant_set(goal, relevant_to) if relevance else None
